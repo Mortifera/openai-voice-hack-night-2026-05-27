@@ -194,7 +194,68 @@ User:   "Resume." → context rehydrates, Strip ready
 
 **What "resume" restores**: Harness (always), project metadata (always), conversation context (only if "resume" chosen). Active agents do NOT auto-respawn — clean slate.
 
-## Pass 4 — AI Slop Risk ⏳
+## Pass 4 — AI Slop Risk ✅
+
+### The five slop risks and counter-strategies
+
+| Risk | Slop look | Director's counter |
+|---|---|---|
+| **Generic glass** | Web `backdrop-filter` + neon edges | **Real macOS `NSVisualEffectView`** (under-window, active) — texture from actual wallpaper. Tonal range warm/quiet, not cool/neon. |
+| **Agent dashboard cards** | 4 cards in a 2×2 grid with progress bars, status badges | **Not cards.** Each agent = a horizontal row: status disc · named identifier · italic micro-text trail · breadcrumb of recent files. Density calm. |
+| **Stock moodboards** | Generic Unsplash tiles labeled Modern / Minimal / Bold | **Bespoke renders.** Each tile is a tiny live render in the option's actual aesthetic — real type, real palette, real motion. An *instance* of the vibe, not an image of it. |
+| **ChatGPT-tone narration** | "I'd be happy to help with that…" | **Terse Director persona** (Pass 3). Voice: `marin` or `cedar` (Realtime-exclusive). |
+| **Progress bars + spinners** | Linear progress, percentage labels | **Pulse rhythms as language.** Working = slow breathing pulse. Blocked = staccato + chime. Thinking = deeper, slower blue pulse. No percentages, no bars. |
+
+### Hive design (the actual layout)
+
+```
+┌─ Strip (Hive mode, 56px wide × ~360px tall) ──────┐
+│                                                    │
+│  ◐  Maya       Frontend                            │  working — coral name
+│  ╰─ wiring the flip animation                      │
+│  ╰─ PlaylistCard.tsx · CoverArt.tsx                │
+│                                                    │
+│  ◑  Jin        Backend                             │  blocked — teal name (amber ring)
+│  ╰─ awaiting Stripe key direction                  │
+│                                                    │
+│  ◐  Cleo       Data                                │  working — ochre name
+│  ╰─ writing Mixtape schema                         │
+│  ╰─ lib/schema.ts                                  │
+│                                                    │
+│  ●  Wren       Design                              │  done — plum name (dim ring)
+│  ╰─ holographic tokens locked                      │
+│                                                    │
+└────────────────────────────────────────────────────┘
+```
+
+- Status ring sits LEFT of the name (◐ working, ◑ blocked, ◓ thinking, ● done).
+- Name carries the agent's personal accent color. Status color stays in the ring only.
+- Micro-text italic, dimmed. Files a half-step smaller.
+
+### Agent naming (4A-1) — short human names, role tag
+
+Mixtape demo roster (swappable; specifics finalized in Pass 5):
+
+| Name | Role | Accent | Specialization | Narration tone |
+|---|---|---|---|---|
+| **Maya** | Frontend | coral | React + Tailwind, composition over inheritance, no CSS-in-JS | Enthusiastic-brief gerunds (*"wiring the flip animation"*) |
+| **Jin** | Backend | slate blue | Next.js API routes, Node-idiomatic, edge-friendly handlers | Technical-terse declaratives (*"POST /api/generate routed"*) |
+| **Cleo** | Data | ochre | Schemas-first, Zod for runtime validation, file-backed JSON for demo persistence | Methodical statements (*"Mixtape schema written"*) |
+| **Wren** | Design | plum | Tailwind tokens, motion primitives, theme tokens, accessibility contrast | Descriptive observations (*"holographic tokens locked"*) |
+
+### Identity depth (4B-1) — visual + specialization + light personality
+
+Each agent's Codex subprocess is spawned with a system prompt seeded from the table above. **Personality affects narration only, never code style** — code follows project conventions exactly.
+
+Example system prompt for Maya:
+```
+You are the React/UI agent. Idiomatic React, Tailwind utility-first,
+compose over inherit. Narrate work in brief enthusiastic gerunds
+("wiring the flip animation", "tuning the spring"). Match project
+file conventions exactly. Never reference your name or persona inside code.
+```
+
+Director references agents by name in narration: *"Maya is on the card. Jin just shipped the generate route."*
 
 ## Pass 5 — Design System Alignment ⏳
 
