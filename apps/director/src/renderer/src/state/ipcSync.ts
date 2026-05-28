@@ -24,6 +24,7 @@ import type {
   AskShowPayload,
   StatePatchPayload,
 } from '../../../shared/ipc.js';
+import type { CodexEvent } from '../../../shared/codex.js';
 import { startMixtapeDemo, resolveJinBlocker } from './sim.js';
 
 // ─── Patch action shapes (mirror tool-router) ────────────────────────────
@@ -97,6 +98,209 @@ function applyPatch(payload: StatePatchPayload): void {
   }
 }
 
+// ─── § codex-event-bridge (W3 — P4) ──────────────────────────────────────
+//
+// Maps `IpcChannel.CodexEvent` records emitted by `main/codex-pool.ts` to
+// canonical store commands. The mapping table lives in docs/contracts.md
+// § 14 / W3 P4 prompt; the live impl is below.
+//
+// Each arm is defensive — missing or wrong-typed payload fields produce a
+// `console.warn` + noop, never a throw. The pool's payload shapes are
+// asserted at the boundary, but the renderer can't trust them blindly
+// (mocking, replay, future SDK drift).
+
+const RECENT_FILES_CAP = 3;
+const TASK_TRAIL_CAP = 8;
+
+/**
+ * Pass 4 identity palette — Frontend / Backend / Data / Design map to the
+ * Hive accent ring colors. Mirrors `apps/director/src/main/tool-router.ts`'s
+ * IDENTITY table (kept local to avoid a renderer↔main cross-process import).
+ */
+const ACCENT_FOR_ROLE: Record<string, `#${string}`> = {
+  frontend: '#E07856',
+  backend: '#4A9E9C',
+  data: '#C99550',
+  design: '#9670A0',
+};
+const FALLBACK_ACCENT: `#${string}` = '#9AA0A6';
+
+function accentForRole(role: unknown): `#${string}` {
+  if (typeof role !== 'string') return FALLBACK_ACCENT;
+  return ACCENT_FOR_ROLE[role.toLowerCase()] ?? FALLBACK_ACCENT;
+}
+
+function asString(v: unknown): string | null {
+  return typeof v === 'string' && v.length > 0 ? v : null;
+}
+
+function asObject(v: unknown): Record<string, unknown> | null {
+  return typeof v === 'object' && v !== null
+    ? (v as Record<string, unknown>)
+    : null;
+}
+
+/** Prepend new paths, dedupe by string equality, cap. Newest first. */
+function mergeRecentFiles(existing: string[], incoming: string[]): string[] {
+  if (incoming.length === 0) return existing;
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const p of [...incoming, ...existing]) {
+    if (seen.has(p)) continue;
+    seen.add(p);
+    result.push(p);
+    if (result.length >= RECENT_FILES_CAP) break;
+  }
+  return result;
+}
+
+/**
+ * Pure mapper exposed for unit tests. Applies the appropriate `commands.*`
+ * call(s) for a single CodexEvent. Returns silently on malformed input.
+ *
+ * Exported separately from `handleCodexEvent` so tests can drive it without
+ * having to go through `initIpcSync()`.
+ */
+export function handleCodexEvent(event: CodexEvent): void {
+  if (!event || typeof event !== 'object') return;
+  const id = asString(event.agent_id);
+  if (!id) {
+    console.warn('[ipcSync] codex event missing agent_id', event);
+    return;
+  }
+  const payload = asObject(event.payload) ?? {};
+
+  switch (event.type) {
+    case 'agent_started': {
+      const name = asString(payload.name) ?? id;
+      const role = asString(payload.role) ?? 'Frontend';
+      const task = asString(payload.task);
+      const worktree = asString(payload.worktree);
+      const existing = useStore.getState().agents[id];
+      if (!existing) {
+        commands.addAgent({
+          id,
+          name,
+          role,
+          accentColor: accentForRole(role),
+          status: 'working',
+          currentTask: task,
+          taskTrail: task ? [task] : [],
+          recentFiles: [],
+          blocker: null,
+          worktreePath: worktree,
+          codexThreadId: null,
+          dispatchedAt: event.at ?? Date.now(),
+          finishedAt: null,
+        });
+      } else {
+        commands.updateAgent(id, {
+          status: 'working',
+          worktreePath: worktree ?? existing.worktreePath,
+          currentTask: task ?? existing.currentTask,
+        });
+      }
+      return;
+    }
+
+    case 'thread_started': {
+      const threadId = asString(payload.thread_id);
+      if (!threadId) {
+        console.warn('[ipcSync] thread_started missing thread_id', event);
+        return;
+      }
+      commands.updateAgent(id, { codexThreadId: threadId });
+      return;
+    }
+
+    case 'file_change': {
+      const item = asObject(payload.item);
+      const changes = item && Array.isArray(item.changes) ? item.changes : [];
+      const incoming: string[] = [];
+      // Latest change in the list should land at the front, so we iterate
+      // the SDK's order in reverse (preserves "newest last → newest first").
+      for (let i = changes.length - 1; i >= 0; i -= 1) {
+        const change = asObject(changes[i]);
+        const path = change ? asString(change.path) : null;
+        if (path) incoming.push(path);
+      }
+      if (incoming.length === 0) {
+        // Some SDK shapes carry `item.path` directly — accept as fallback.
+        const fallback = item ? asString(item.path) : null;
+        if (fallback) incoming.push(fallback);
+      }
+      if (incoming.length === 0) return;
+      const existing = useStore.getState().agents[id];
+      if (!existing) return;
+      const merged = mergeRecentFiles(existing.recentFiles, incoming);
+      commands.updateAgent(id, { recentFiles: merged });
+      return;
+    }
+
+    case 'agent_message': {
+      const phase = asString(payload.phase);
+      if (phase !== 'item.completed') return;
+      const item = asObject(payload.item);
+      const text = item ? asString(item.text) : null;
+      if (!text) return;
+      const existing = useStore.getState().agents[id];
+      if (!existing) return;
+      const nextTrail = [...existing.taskTrail, text].slice(-TASK_TRAIL_CAP);
+      commands.updateAgent(id, {
+        currentTask: text,
+        taskTrail: nextTrail,
+      });
+      return;
+    }
+
+    case 'error': {
+      // turn.failed / error item / stream error all flatten message into
+      // payload.message OR payload.item.message. Prefer the flat one.
+      const flatMessage = asString(payload.message);
+      const itemMessage = (() => {
+        const item = asObject(payload.item);
+        return item ? asString(item.message) : null;
+      })();
+      const message = flatMessage ?? itemMessage ?? 'unknown_error';
+      const existing = useStore.getState().agents[id];
+      if (!existing) {
+        console.warn('[ipcSync] codex error for unknown agent', id);
+        return;
+      }
+      commands.blockAgent(id, message);
+      return;
+    }
+
+    case 'agent_finished': {
+      const existing = useStore.getState().agents[id];
+      if (!existing) {
+        console.warn('[ipcSync] agent_finished for unknown agent', id);
+        return;
+      }
+      const aborted = payload.aborted === true;
+      if (aborted) {
+        commands.failAgent(id, 'aborted');
+      } else {
+        const summary = asString(payload.summary) ?? undefined;
+        commands.completeAgent(id, summary);
+      }
+      return;
+    }
+
+    case 'reasoning':
+    case 'command_execution':
+    case 'tool_call':
+    case 'turn_completed':
+      // v1: noop. Surface in future passes if the Hive UI grows space for them.
+      return;
+
+    default: {
+      console.warn('[ipcSync] unknown codex event type', event.type);
+      return;
+    }
+  }
+}
+
 // ─── ask.show handler ────────────────────────────────────────────────────
 
 /**
@@ -150,6 +354,13 @@ export function initIpcSync(): void {
     unsubscribers.push(bridge.ask.onShow(handleAsk));
   } else {
     console.warn('[ipcSync] bridge.ask.onShow not exposed');
+  }
+
+  // § codex-event-bridge (W3 — P4)
+  if (bridge.codex?.onEvent) {
+    unsubscribers.push(bridge.codex.onEvent(handleCodexEvent));
+  } else {
+    console.warn('[ipcSync] bridge.codex.onEvent not exposed — codex events dropped');
   }
 }
 

@@ -28,6 +28,7 @@ import type {
   TranscriptItem,
   WorldStateBrief,
 } from './state.js';
+import type { CodexEvent } from './codex.js';
 
 // ─── Channel enum ────────────────────────────────────────────────────────
 
@@ -417,6 +418,14 @@ export interface DirectorBridge {
     onShow: (cb: (payload: AskShowPayload) => void) => () => void;
     answer: (payload: AskAnswerPayload) => void;
   };
+  // ─── § codex-event-bridge (W3 — P4) ─────────────────────────────────
+  /** Codex pool events broadcast from main on `IpcChannel.CodexEvent`.
+   *  The renderer's `state/ipcSync.ts` subscribes and maps each event to
+   *  one or more canonical store commands. See docs/contracts.md § 13.1
+   *  (append-only marker) and the mapping table in `handleCodexEvent`. */
+  codex: {
+    onEvent: (cb: (event: CodexEvent) => void) => () => void;
+  };
 }
 
 declare global {
@@ -447,6 +456,8 @@ export interface IpcSendMap {
   [IpcChannel.CanvasRender]: CanvasRenderBroadcastPayload;
   [IpcChannel.AskShow]: AskShowPayload;
   [IpcChannel.AskAnswer]: AskAnswerPayload;
+  // § codex-event-bridge (W3 — P4)
+  [IpcChannel.CodexEvent]: CodexEvent;
 }
 
 /** Invoke-style channels (request → ack). */

@@ -19,6 +19,7 @@ import {
   type StripResizeRequest,
   type StripResizeResponse,
 } from '../shared/ipc.js';
+import type { CodexEvent } from '../shared/codex.js';
 import type {
   RealtimeEphemeralToken,
   RealtimeSessionRequest,
@@ -86,6 +87,14 @@ const api: DirectorBridge = {
     },
     answer(payload: AskAnswerPayload): void {
       ipcRenderer.send(IpcChannel.AskAnswer, payload);
+    },
+  },
+  // ─── § codex-event-bridge (W3 — P4) ────────────────────────────────────
+  codex: {
+    onEvent(cb) {
+      const listener = (_evt: unknown, event: CodexEvent): void => cb(event);
+      ipcRenderer.on(IpcChannel.CodexEvent, listener);
+      return () => ipcRenderer.removeListener(IpcChannel.CodexEvent, listener);
     },
   },
 };

@@ -32,34 +32,16 @@ import { join } from 'node:path';
 import { ipcMain, type BrowserWindow } from 'electron';
 import { IpcChannel } from '../shared/ipc.js';
 import type { AgentId, AgentRole } from '../shared/state.js';
+import type { CodexEvent, CodexEventType } from '../shared/codex.js';
 import { createWorktree, type WorktreeHandle } from './codex-worktree.js';
 
 // ─── Public types ──────────────────────────────────────────────────────
 
-/**
- * Narrowed event vocabulary the renderer state machine consumes. The
- * `payload` field carries the underlying SDK ThreadEvent (or a synthetic
- * envelope for pool-emitted events) so W3 can extract whatever fields the
- * Hive UI needs without re-importing the SDK in the renderer.
- */
-export type CodexEventType =
-  | 'agent_started' // synthetic — pool emits before SDK first event
-  | 'thread_started' // SDK thread.started — carries thread_id
-  | 'agent_message' // item.completed/updated, item.type=agent_message
-  | 'reasoning' // item.*, item.type=reasoning
-  | 'command_execution' // item.*, item.type=command_execution
-  | 'file_change' // item.*, item.type=file_change
-  | 'tool_call' // item.*, item.type ∈ {mcp_tool_call, web_search, todo_list}
-  | 'error' // item.type=error OR turn.failed OR error event
-  | 'turn_completed' // turn.completed (carries token usage)
-  | 'agent_finished'; // synthetic — pool emits on natural end / abort / error
-
-export interface CodexEvent {
-  agent_id: AgentId;
-  type: CodexEventType;
-  payload: Record<string, unknown>;
-  at: number;
-}
+// `CodexEvent` + `CodexEventType` are declared in `shared/codex.ts` so the
+// renderer can consume them through the preload bridge. Re-exported here
+// so existing main-side callers (`code.event` IPC sender, etc.) keep
+// working unchanged.
+export type { CodexEvent, CodexEventType };
 
 export interface DispatchAgentRequest {
   agentId: AgentId;
