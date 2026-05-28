@@ -265,9 +265,9 @@ const workers = [
   {
     role: "MAIN", name: "Worker 1", domain: "Electron main process · bridge · tool router · windows · Codex spawner",
     tasks: [
-      { id: "p1.a", phase: "P1", name: "Bridge diagnose + fix", t0: 0, t1: 1, status: "next", crit: true, body: "Verify preload load, fix sandbox/.cjs, confirm window.director in devtools." },
-      { id: "p2.a", phase: "P2", name: "Restore overlay window flags", t0: 2.5, t1: 3, status: "pending", body: "transparent · vibrancy · frame:false · closable:false · type:'panel'" },
-      { id: "p2.b", phase: "P2", name: "Chat-debug 2nd BrowserWindow", t0: 3, t1: 4, status: "pending", body: "Tray menu → second normal window for debug. Same store." },
+      { id: "p1.a", phase: "P1", name: "Bridge diagnose + fix", t0: 0, t1: 1, status: "done", crit: true, body: "sandbox:false + CSP api.openai.com + transcription model. Commits 052ac4c, 4138d35, c8bc4dd, 4fa1340." },
+      { id: "p2.a", phase: "P2", name: "Restore overlay window flags", t0: 2.5, t1: 3, status: "done", body: "Commit 8314a5a — transparent · vibrancy · frame:false · closable:false · type:'panel'" },
+      { id: "p2.b", phase: "P2", name: "Chat-debug 2nd BrowserWindow", t0: 3, t1: 4, status: "done", body: "Commits 83456de (re-anchor) + 55af200 (tray menu chat-debug). Strip on right edge, chat debug via tray." },
       { id: "p3.a", phase: "P3", name: "Planner service (Responses API + gpt-5)", t0: 5, t1: 6.5, status: "pending", body: "Main-process planner. reasoning.effort: high. Stateless with side-store re-injection." },
       { id: "p4.a", phase: "P4", name: "Codex SDK + 4-process pool", t0: 5, t1: 6, status: "pending", body: "Install @openai/codex-sdk · spawn manager · JSONL parser. Sequential after planner — same worker." },
       { id: "p4.b", phase: "P4", name: "Worktree + AGENTS.md per agent", t0: 6, t1: 7.5, status: "pending", body: "git worktree per Codex spawn · AGENTS.md as system prompt." },
@@ -276,7 +276,7 @@ const workers = [
   {
     role: "VOICE", name: "Worker 2", domain: "Realtime voice · WebRTC client · session · tool delivery · escalation",
     tasks: [
-      { id: "p1.c", phase: "P1", name: "Escalation → Realtime injection", t0: 1, t1: 2, status: "next", crit: true, body: "director:escalation event → conversation.item.create + response.create. Starts AFTER W1's bridge fix lands." },
+      { id: "p1.c", phase: "P1", name: "Escalation → Realtime injection", t0: 1, t1: 2, status: "done", crit: true, body: "Prereqs verified. Code from hackathon (commit 98d5169) intact. Awaiting physical smoke at R1." },
       { id: "p3.b", phase: "P3", name: "consult_director tool + bridge", t0: 5, t1: 6.5, status: "pending", body: "Tool def in session.update · routes to planner · reasoning summary → audio narration." },
       { id: "p6.a", phase: "P6", name: "55-min session rotation", t0: 8, t1: 9, status: "pending", body: "Mint Session_B · World State Brief inject · swap < 200ms." },
       { id: "p6.b", phase: "P6", name: "Disconnect / reconnect UX", t0: 9, t1: 9.5, status: "pending", body: "Grey Strip · macOS notif · queue last utterance for replay." },
@@ -285,7 +285,7 @@ const workers = [
   {
     role: "STATE", name: "Worker 3", domain: "State machine · IPC contracts · agent simulator · side store · audio cues",
     tasks: [
-      { id: "p1.b", phase: "P1", name: "Tool routing smoke test", t0: 0.5, t1: 2, status: "next", crit: true, body: "Show Moodboard / Show Artifact buttons → tool.call → tool-router → Canvas. Verify path end-to-end." },
+      { id: "p1.b", phase: "P1", name: "Tool routing smoke test", t0: 0.5, t1: 2, status: "done", crit: true, body: "Static-verified end-to-end. Every layer wired correctly. Bug was upstream (sandbox), fixed by W1." },
       { id: "p3.c", phase: "P3", name: "Side store (harness · decisions · transcript)", t0: 5, t1: 6, status: "pending", body: "Atomic writes (tmp + rename) · debounced agent snapshots. NEW FILE — no overlap with W1." },
       { id: "p4.c", phase: "P4", name: "Codex events → store actions", t0: 6, t1: 7.5, status: "pending", body: "file_change · turn.completed · error → addAgent/updateAgent/blockAgent/completeAgent." },
       { id: "p5.b", phase: "P5", name: "Audio cue synthesis", t0: 8, t1: 8.5, status: "pending", body: "Web Audio: confirm · tick · escalation · done · halo. NEW DIR src/renderer/src/audio/*." },
@@ -294,9 +294,9 @@ const workers = [
   {
     role: "UI", name: "Worker 4", domain: "Strip components · App.tsx render · chat UI · captions · onboarding",
     tasks: [
-      { id: "p2.a2", phase: "P2", name: "App.tsx revert to strip render", t0: 2.5, t1: 3.5, status: "pending", crit: true, body: "Conditional render dormant/listening/speaking/thinking/hive. Keep state wiring from W2." },
-      { id: "p2.a3", phase: "P2", name: "Auto-resize per state", t0: 3.5, t1: 4, status: "pending", body: "strip.resize IPC drives setBounds. 12→38→280." },
-      { id: "p2.c", phase: "P2", name: "Visual QA vs Pencil", t0: 4, t1: 4.5, status: "pending", body: "Screenshot every state, compare to Pencil frames." },
+      { id: "p2.a2", phase: "P2", name: "App.tsx surface switcher (Strip default, Chat via ?surface=chat)", t0: 2.5, t1: 3.5, status: "next", crit: true, body: "ChatSurface + StripSurface extracted. Conditional render based on query param. In-flight as of W4 dispatch." },
+      { id: "p2.a3", phase: "P2", name: "Auto-resize gated by surface=strip", t0: 3.5, t1: 4, status: "next", body: "strip.resize IPC only called when surface is 'strip'. 12→38→280." },
+      { id: "p2.c", phase: "P2", name: "Visual QA vs Pencil", t0: 4, t1: 4.5, status: "next", body: "Screenshot every state, compare to Pencil frames. Part of W4 task 6." },
       { id: "p5.a", phase: "P5", name: "Captions component (NEW file)", t0: 8.5, t1: 9.25, status: "pending", body: "components/Captions.tsx — fading subtitle below strip. Avoids App.tsx conflict by being its own component mounted from App.tsx." },
       { id: "p5.c", phase: "P5", name: "Polish (canvas-handle · hover-peek · onboarding)", t0: 9.25, t1: 10, status: "pending", body: "Strip-as-Canvas-handle · hover-to-peek · 3A-1 minimal-seed welcome." },
     ]
@@ -304,7 +304,7 @@ const workers = [
   {
     role: "CANVAS", name: "Worker 5", domain: "Canvas BrowserWindow · GenUI React components · iframe punchline",
     tasks: [
-      { id: "p2.c2", phase: "P2", name: "Canvas visual QA", t0: 4, t1: 4.5, status: "pending", body: "Verify Canvas slides correctly with new strip positioning. Read-only — no code conflict with Worker 1's window changes." },
+      { id: "p2.c2", phase: "P2", name: "Canvas visual QA", t0: 4, t1: 4.5, status: "done", body: "Folded into Main's R2 review (no worker needed — just click Show Moodboard, verify position)." },
       { id: "p4.d", phase: "P4", name: "Dogfood: real Codex builds Mixtape TODOs", t0: 7, t1: 8, status: "pending", body: "Verify iframe punchline shows live Mixtape with completed flippable card after real Codex run." },
     ]
   },
