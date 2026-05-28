@@ -1,6 +1,7 @@
 packages:
   - "apps/*"
   - "packages/*"
+  - "examples/*"
 
 # pnpm 10 ignores postinstall scripts by default. Allow the ones we need
 # (electron downloads its binary, esbuild downloads its native binary).

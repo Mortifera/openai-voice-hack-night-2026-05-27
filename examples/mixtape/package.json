@@ -1,0 +1,30 @@
+{
+  "name": "mixtape",
+  "version": "0.0.0",
+  "description": "Demo target app for Director — vibe-to-playlist card generator. Scaffolded with intentional TODOs that the Mixtape agents (Maya/Jin/Cleo/Wren) finish live during the hack-night demo.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev -p 3001",
+    "build": "next build",
+    "start": "next start -p 3001",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "framer-motion": "^11.11.17",
+    "next": "^15.0.3",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.0.0-beta.4",
+    "@types/node": "^22.9.0",
+    "@types/react": "^19.0.1",
+    "@types/react-dom": "^19.0.1",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^4.0.0-beta.4",
+    "typescript": "^5.6.3"
+  }
+}
