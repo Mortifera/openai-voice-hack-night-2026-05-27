@@ -96,6 +96,11 @@ export const IpcChannel = {
   // (docs(contracts): change <name> commit).
   PlannerConsult: 'planner.consult',                  // Worker 1 — P3
   PlannerReasoningDelta: 'planner.reasoning.delta',   // Worker 1 — P3
+  SidestoreSnapshot: 'sidestore.snapshot',            // Worker 3 — P3
+  // ─── codex.* (real Codex subprocesses) ────────────────────────────────
+  CodexEvent: 'codex.event',                          // Worker 1 — P4
+  CodexDispatch: 'codex.dispatch',                    // Worker 1 — P4
+  CodexAbort: 'codex.abort',                          // Worker 1 — P4
 } as const;
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel];
@@ -469,6 +474,12 @@ export interface IpcInvokeMap {
     response: MicToggleResponse;
   };
   [IpcChannel.AppQuit]: { request: void; response: AppQuitResponse };
+  [IpcChannel.SidestoreSnapshot]: {
+    request: void;
+    response:
+      | { ok: true; world: Record<string, unknown> }
+      | { ok: false; error: string };
+  };
 }
 
 // ─── Re-export state types so callers only need this import ──────────────
