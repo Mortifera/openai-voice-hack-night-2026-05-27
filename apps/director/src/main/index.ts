@@ -4,6 +4,8 @@ import { config as loadDotenv } from 'dotenv';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { IpcChannel, type DormantState } from '../shared/ipc.js';
+import type { RealtimeEphemeralToken, RealtimeSessionRequest } from '../shared/realtime.js';
+import { mintEphemeralToken } from './realtime.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
@@ -149,6 +151,17 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IpcChannel.RequestSummon, async (): Promise<void> => {
     console.log('[director] summon requested (stub)');
   });
+
+  ipcMain.handle(
+    IpcChannel.RealtimeMintToken,
+    async (_evt, req: RealtimeSessionRequest = {}): Promise<RealtimeEphemeralToken> => {
+      const token = await mintEphemeralToken(req);
+      console.log(
+        `[director] minted realtime token model=${token.model} expires_at=${token.expiresAt}`,
+      );
+      return token;
+    },
+  );
 }
 
 // ───────────────────────────────────────────────────────────────────────────

@@ -5,6 +5,10 @@ import {
   type DormantState,
   type HotkeyListener,
 } from '../shared/ipc.js';
+import type {
+  RealtimeEphemeralToken,
+  RealtimeSessionRequest,
+} from '../shared/realtime.js';
 
 const api: DirectorBridge = {
   onHotkey(cb: HotkeyListener) {
@@ -17,6 +21,11 @@ const api: DirectorBridge = {
   },
   getDormantState(): Promise<DormantState> {
     return ipcRenderer.invoke(IpcChannel.GetDormantState);
+  },
+  realtime: {
+    mintToken(req?: RealtimeSessionRequest): Promise<RealtimeEphemeralToken> {
+      return ipcRenderer.invoke(IpcChannel.RealtimeMintToken, req);
+    },
   },
 };
 
