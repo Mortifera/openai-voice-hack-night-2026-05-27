@@ -8,16 +8,21 @@
 
 import { NextResponse } from "next/server";
 
-export async function GET(_req: Request, { params }: { params: { id: string } }) {
+// Next.js 15: route params arrive as a Promise.
+type Params = { params: Promise<{ id: string }> };
+
+export async function GET(_req: Request, { params }: Params) {
+  const { id } = await params;
   return NextResponse.json(
-    { error: `mixtape ${params.id} lookup not implemented yet (Jin TODO)` },
+    { error: `mixtape ${id} lookup not implemented yet (Jin TODO)` },
     { status: 501 },
   );
 }
 
-export async function POST(_req: Request, { params }: { params: { id: string } }) {
+export async function POST(_req: Request, { params }: Params) {
+  const { id } = await params;
   return NextResponse.json(
-    { error: `mixtape ${params.id} persistence not implemented yet (Jin TODO)` },
+    { error: `mixtape ${id} persistence not implemented yet (Jin TODO)` },
     { status: 501 },
   );
 }
