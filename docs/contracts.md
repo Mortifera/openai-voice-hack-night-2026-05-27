@@ -1,6 +1,6 @@
 # Director — Contracts
 
-> **Version**: 2026-05-27.3
+> **Version**: 2026-05-27.4
 > **Status**: Source of truth for cross-worker integration. Every agent prompt MUST point at this doc. Every contract change is a commit that updates the version above.
 
 This file is the single shared boundary between workers. If two workers are about to touch the same shape, this is where they agree on it BEFORE writing code. The hackathon retrospective made the diagnosis: subsystems worked in isolation; the integration boundary failed because no canonical contract existed. This is that document.
@@ -633,6 +633,105 @@ If Worker A's task depends on Worker B's commit, the dispatch prompt for Worker 
 ```
 
 No worker assumes another's deliverable is on `main`. They verify.
+
+---
+
+## 14. Side store integration points
+
+The side store API (`apps/director/src/main/side-store.ts`) is implemented by
+W3. It is the on-disk source of truth for session state: harness rules,
+decisions, per-agent snapshots, and the transcript. Other workers call its
+helpers at the moments below. Wiring happens at R3 review — Main does the
+cross-cutting integration. This section is the contract those wirings target.
+
+### Public surface (importable from `main/`)
+
+```ts
+import {
+  initSession,
+  registerSideStoreIpc,
+  readWorldState,
+  snapshotWorldState,
+  appendHarnessRule,
+  appendDecision,
+  writeAgent,
+  queueAgentWrite,
+  flushAgentWrites,
+  appendTranscript,
+  setCurrentTask,
+  setLastCanvas,
+  clearLastCanvas,
+  type WorldState,
+  type Decision,
+} from './side-store.js';
+```
+
+### Boot (W1 — `main/index.ts`)
+
+Inside `app.whenReady()`, after the strip window is created:
+
+```ts
+await registerSideStoreIpc();    // boots session dir + exposes sidestore.snapshot
+```
+
+`initSession()` is idempotent — `registerSideStoreIpc()` calls it for you.
+
+### Tool router (W1 — `main/tool-router.ts`)
+
+- `handleUpdateHarness`: after `sendStripPatch('harness', ...)`, also:
+  ```ts
+  await appendHarnessRule(rule);
+  await appendDecision({ at: Date.now(), kind: 'harness_rule', payload: { id: rule.id } });
+  ```
+- `handleDispatchAgentMock`: after the addAgent patch, persist + log:
+  ```ts
+  await writeAgent(agent);
+  await appendDecision({ at: Date.now(), kind: 'agent_dispatched', payload: { agent_id: agent.id, task: agent.currentTask } });
+  ```
+- `handleRenderCanvas`: tag the world-state snapshot with the most recent
+  surface so the planner can reason about it:
+  ```ts
+  setLastCanvas(args.component, args.props);
+  ```
+
+### Sim driver (W3 — `renderer/src/state/sim.ts`)
+
+The sim lives in the renderer; it cannot directly call `side-store`. Instead it
+fires an IPC `state.patch` event that main mirrors into the side store. The
+simplest path is for main to subscribe to its own `state.patch` broadcasts and
+call `queueAgentWrite(agent)` whenever an agent slice changes. This keeps the
+sim renderer-only and the disk write co-located with FS.
+
+### Planner (W1 — `main/planner.ts`)
+
+Replace the stub:
+
+```diff
+- async function readWorldState(): Promise<Record<string, unknown>> {
+-   // TODO(side-store): swap for `await readSideStore()` once W3 ships it.
+-   return { active_agents: [], harness: [], recent_decisions: [], current_task: null };
+- }
++ import { readWorldState } from './side-store.js';
+```
+
+`readWorldState()` is auto-initialising, so the planner does not need to call
+`initSession()` itself.
+
+### Realtime client (W2 — `renderer/src/realtime/*` + bridge)
+
+On each `conversation.item.input_audio_transcription.completed` /
+`response.output_audio_transcript.done` event, the renderer should emit a
+patch to main so `appendTranscript(item)` runs. Same mechanism as agent
+persistence — fire-and-forget IPC, main writes the JSONL line.
+
+### Shutdown
+
+Main calls `await flushAgentWrites()` from `app.on('before-quit', ...)` so any
+pending debounced agent writes hit disk before the process exits.
+
+### IPC channel
+
+- `sidestore.snapshot` (invoke, renderer→main) — returns `{ ok: true, world } | { ok: false, error }`. Exposed for dev tooling and the rotation-reseed flow. Channel is `IpcChannel.SidestoreSnapshot` (`'sidestore.snapshot'`).
 
 ---
 
