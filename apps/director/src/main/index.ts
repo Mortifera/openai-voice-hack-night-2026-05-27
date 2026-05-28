@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, Menu, screen, Tray, nativeImage } from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain, Menu, Tray, nativeImage } from 'electron';
 import { electronApp, optimizer, is } from '@electron-toolkit/utils';
 import { config as loadDotenv } from 'dotenv';
 import { join, resolve } from 'node:path';
@@ -39,31 +39,17 @@ loadDotenv({ path: resolve(REPO_ROOT, '.env') });
 loadDotenv({ path: resolve(APP_DIR, '.env') });
 
 // ───────────────────────────────────────────────────────────────────────────
-// Strip geometry (dormant baseline). See docs/ux-design.md Pass 1 & 5.
+// Director chat window geometry.
 // ───────────────────────────────────────────────────────────────────────────
-const STRIP_WIDTH = 12;
-const STRIP_HEIGHT = 180;
-const STRIP_EDGE_OFFSET = 20;
-const STRIP_MAX_WIDTH = 320;
-const STRIP_MAX_HEIGHT = 480;
+const DIRECTOR_WINDOW_WIDTH = 480;
+const DIRECTOR_WINDOW_HEIGHT = 720;
 
 let stripWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let quittingExplicitly = false;
-let lastStripDims: { width: number; height: number } = {
-  width: STRIP_WIDTH,
-  height: STRIP_HEIGHT,
-};
 
-function computeStripBounds(
-  width: number = lastStripDims.width,
-  height: number = lastStripDims.height,
-): { x: number; y: number; width: number; height: number } {
-  const display = screen.getPrimaryDisplay();
-  const { workArea } = display;
-  const x = workArea.x + workArea.width - width - STRIP_EDGE_OFFSET;
-  const y = workArea.y + Math.round((workArea.height - height) / 2);
-  return { x, y, width, height };
+function computeStripBounds(): { width: number; height: number } {
+  return { width: DIRECTOR_WINDOW_WIDTH, height: DIRECTOR_WINDOW_HEIGHT };
 }
 
 function createStripWindow(): BrowserWindow {
@@ -71,21 +57,11 @@ function createStripWindow(): BrowserWindow {
 
   const window = new BrowserWindow({
     ...bounds,
+    center: true,
     show: false,
-    frame: false,
-    transparent: true,
-    resizable: false,
-    movable: false,
-    minimizable: false,
-    maximizable: false,
-    closable: false,
-    fullscreenable: false,
-    skipTaskbar: true,
-    hasShadow: false,
-    roundedCorners: true,
-    vibrancy: 'under-window',
-    visualEffectState: 'active',
-    type: 'panel',
+    frame: true,
+    resizable: true,
+    movable: true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
       sandbox: true,
@@ -93,10 +69,6 @@ function createStripWindow(): BrowserWindow {
       nodeIntegration: false,
     },
   });
-
-  // True overlay — float above fullscreen apps and screen savers.
-  window.setAlwaysOnTop(true, 'screen-saver');
-  window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
   window.on('ready-to-show', () => {
     window.show();
@@ -315,25 +287,12 @@ function registerIpcHandlers(): void {
   });
 
   // ─── window.strip.resize (W2) ────────────────────────────────────────
-  // Renderer requests new Strip geometry on stripState change. Main
-  // re-anchors to the right edge (workArea-aware) and animates the
-  // bounds change on macOS.
+  // Legacy renderer calls still arrive on stripState changes. Director is
+  // now a fixed-size chat window, so acknowledge without resizing.
   ipcMain.handle(
     IpcChannel.WindowStripResize,
-    async (_evt, dims: StripResizeRequest): Promise<StripResizeResponse> => {
-      if (!stripWindow || stripWindow.isDestroyed()) {
-        return { ok: false, error: 'strip window not available' };
-      }
-      const width = Math.max(8, Math.min(STRIP_MAX_WIDTH, Math.round(dims.width)));
-      const height = Math.max(60, Math.min(STRIP_MAX_HEIGHT, Math.round(dims.height)));
-      lastStripDims = { width, height };
-      const bounds = computeStripBounds(width, height);
-      try {
-        stripWindow.setBounds(bounds, true);
-        return { ok: true };
-      } catch (err) {
-        return { ok: false, error: String(err) };
-      }
+    async (_evt, _dims: StripResizeRequest): Promise<StripResizeResponse> => {
+      return { ok: true };
     },
   );
 }
@@ -365,20 +324,6 @@ app.whenReady().then(() => {
   registerGlobalHotkey();
   registerIpcHandlers();
   registerToolRouterIpc(stripWindow);
-
-  // Recompute strip position if displays change (lid open / monitor unplug).
-  screen.on('display-metrics-changed', () => {
-    if (!stripWindow) return;
-    stripWindow.setBounds(computeStripBounds());
-  });
-  screen.on('display-added', () => {
-    if (!stripWindow) return;
-    stripWindow.setBounds(computeStripBounds());
-  });
-  screen.on('display-removed', () => {
-    if (!stripWindow) return;
-    stripWindow.setBounds(computeStripBounds());
-  });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
