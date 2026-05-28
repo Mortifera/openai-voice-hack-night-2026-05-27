@@ -207,7 +207,13 @@ export default function CoverArt({ vibe, size = 280 }: Props) {
         ))}
       </g>
 
-      <rect width="300" height="300" fill={palette.grain} mixBlendMode="overlay" filter={`url(#grain-${id})`} />
+      <rect
+        width="300"
+        height="300"
+        fill={palette.grain}
+        filter={`url(#grain-${id})`}
+        style={{ mixBlendMode: "overlay" }}
+      />
 
       <rect
         width="300"
