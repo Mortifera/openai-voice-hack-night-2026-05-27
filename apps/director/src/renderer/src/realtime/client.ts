@@ -30,10 +30,22 @@ export type RealtimeClientStatus =
   | 'closed'
   | 'error';
 
+export type MicMode = 'muted' | 'tap-open' | 'hold-open';
+
+export interface RealtimeStreams {
+  /** Live mic capture. Null until the renderer has microphone access. */
+  mic: MediaStream | null;
+  /** Remote audio track from OpenAI. Null until the peer sends `track`. */
+  remote: MediaStream | null;
+}
+
 export interface RealtimeClientEvents {
   status: RealtimeClientStatus;
   event: Record<string, unknown>; // any JSON event off oai-events
   error: Error;
+  micMode: MicMode;
+  /** Fires when the mic or remote MediaStream becomes available / goes away. */
+  streams: RealtimeStreams;
 }
 
 type Listener<T> = (payload: T) => void;
@@ -42,19 +54,36 @@ export class RealtimeClient {
   private pc: RTCPeerConnection | null = null;
   private dc: RTCDataChannel | null = null;
   private micStream: MediaStream | null = null;
+  private remoteStream: MediaStream | null = null;
   private remoteAudio: HTMLAudioElement | null = null;
   private listeners: { [K in keyof RealtimeClientEvents]: Set<Listener<unknown>> } = {
     status: new Set(),
     event: new Set(),
     error: new Set(),
+    micMode: new Set(),
+    streams: new Set(),
   };
   private _status: RealtimeClientStatus = 'idle';
+  private _micMode: MicMode = 'muted';
   /** call_id → { name, itemId } captured from response.output_item.added so
    *  we can resolve names when only `function_call_arguments.done` fires. */
   private pendingCalls: Map<string, { name: string; itemId: string }> = new Map();
 
   get status(): RealtimeClientStatus {
     return this._status;
+  }
+
+  get micMode(): MicMode {
+    return this._micMode;
+  }
+
+  /** Current mic + remote streams. Either may be null while not connected. */
+  getStreams(): RealtimeStreams {
+    return { mic: this.micStream, remote: this.remoteStream };
+  }
+
+  private emitStreams(): void {
+    this.emit('streams', { mic: this.micStream, remote: this.remoteStream });
   }
 
   on<K extends keyof RealtimeClientEvents>(
@@ -139,8 +168,12 @@ export class RealtimeClient {
       }
     }
 
-    // (W1.barge wires input_audio_buffer.speech_started → response.cancel
-    //  in a follow-up commit.)
+    // W1.barge: user started speaking while the model was speaking → cancel
+    // the in-flight response. The server-side `interrupt_response: true`
+    // also handles this, but sending explicit cancel cuts ~50–100ms.
+    if (type === 'input_audio_buffer.speech_started') {
+      this.send({ type: 'response.cancel' });
+    }
   }
 
   /**
@@ -199,9 +232,14 @@ export class RealtimeClient {
       if (!bridge) throw new Error('window.director bridge missing (non-Electron context?)');
       const realtimeToken = token ?? (await bridge.realtime.mintToken({}));
 
-      // 2. Mic capture.
+      // 2. Mic capture. Default mode 'tap-open' — the first hotkey press
+      // that triggered connect IS the user's open-mic gesture.
       this.setStatus('getting-mic');
       this.micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      this.emitStreams();
+      // Force the event to fire so subscribers see the initial mode.
+      this._micMode = 'muted';
+      this.setMicMode('tap-open');
 
       // 3. PeerConnection.
       this.setStatus('connecting');
@@ -218,7 +256,10 @@ export class RealtimeClient {
           document.body.appendChild(el);
           this.remoteAudio = el;
         }
-        this.remoteAudio.srcObject = evt.streams[0] ?? new MediaStream([evt.track]);
+        const stream = evt.streams[0] ?? new MediaStream([evt.track]);
+        this.remoteAudio.srcObject = stream;
+        this.remoteStream = stream;
+        this.emitStreams();
       };
 
       pc.onconnectionstatechange = () => {
@@ -300,13 +341,39 @@ export class RealtimeClient {
   }
 
   /**
-   * Toggle the mic on/off without tearing down the peer. Used by W1.hotkey.
+   * Set mic mode and apply it to the underlying track.enabled flag.
+   * - 'muted' → track.enabled = false (silence; peer stays open)
+   * - 'tap-open' | 'hold-open' → track.enabled = true
+   * Caller (App) decides which mode based on smart-key gesture.
    */
-  setMicEnabled(enabled: boolean): void {
-    if (!this.micStream) return;
-    for (const track of this.micStream.getAudioTracks()) {
-      track.enabled = enabled;
+  setMicMode(mode: MicMode): void {
+    if (this._micMode === mode) return;
+    this._micMode = mode;
+    if (this.micStream) {
+      const enabled = mode !== 'muted';
+      for (const track of this.micStream.getAudioTracks()) {
+        track.enabled = enabled;
+      }
     }
+    this.emit('micMode', mode);
+
+    // Broadcast over IPC so other windows (Canvas, future status surfaces)
+    // can react. The bridge may be absent in non-Electron contexts.
+    const bridge = window.director;
+    if (bridge?.mic) {
+      try {
+        bridge.mic.setStatus({ state: mode, inputLevel: 0 });
+      } catch (err) {
+        console.warn('[realtime] mic.setStatus failed', err);
+      }
+    }
+  }
+
+  /** Toggle between muted and tap-open. No-op if mic stream missing. */
+  toggleMicTap(): MicMode {
+    const next: MicMode = this._micMode === 'muted' ? 'tap-open' : 'muted';
+    this.setMicMode(next);
+    return next;
   }
 
   /**
@@ -345,7 +412,9 @@ export class RealtimeClient {
     this.dc = null;
     this.pc = null;
     this.micStream = null;
+    this.remoteStream = null;
     this.remoteAudio = null;
+    this.emitStreams();
     this.setStatus('closed');
   }
 }

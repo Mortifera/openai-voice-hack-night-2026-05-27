@@ -7,6 +7,9 @@ import {
   type ToolCallRequest,
   type ToolCallResponse,
   type ToolResultPayload,
+  type MicStatusPayload,
+  type StripResizeRequest,
+  type StripResizeResponse,
 } from '../shared/ipc.js';
 import type {
   RealtimeEphemeralToken,
@@ -43,6 +46,21 @@ const api: DirectorBridge = {
       const listener = (_evt: unknown, payload: ToolResultPayload): void => cb(payload);
       ipcRenderer.on(IpcChannel.ToolResult, listener);
       return () => ipcRenderer.removeListener(IpcChannel.ToolResult, listener);
+    },
+  },
+  mic: {
+    setStatus(payload: MicStatusPayload): void {
+      ipcRenderer.send(IpcChannel.MicStatus, payload);
+    },
+    onStatus(cb) {
+      const listener = (_evt: unknown, payload: MicStatusPayload): void => cb(payload);
+      ipcRenderer.on(IpcChannel.MicStatus, listener);
+      return () => ipcRenderer.removeListener(IpcChannel.MicStatus, listener);
+    },
+  },
+  window: {
+    resizeStrip(dims: StripResizeRequest): Promise<StripResizeResponse> {
+      return ipcRenderer.invoke(IpcChannel.WindowStripResize, dims);
     },
   },
 };

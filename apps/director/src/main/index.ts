@@ -8,6 +8,9 @@ import {
   type DormantState,
   type ToolCallRequest,
   type ToolCallResponse,
+  type MicStatusPayload,
+  type StripResizeRequest,
+  type StripResizeResponse,
 } from '../shared/ipc.js';
 import type { RealtimeEphemeralToken, RealtimeSessionRequest } from '../shared/realtime.js';
 import { mintEphemeralToken } from './realtime.js';
@@ -15,7 +18,7 @@ import {
   createCanvasWindow,
   dismissCanvas,
   registerCanvasIpc,
-  showCanvas,
+  renderCanvas,
   getCanvasWindow,
 } from './canvas.js';
 
@@ -38,17 +41,26 @@ loadDotenv({ path: resolve(APP_DIR, '.env') });
 const STRIP_WIDTH = 12;
 const STRIP_HEIGHT = 180;
 const STRIP_EDGE_OFFSET = 20;
+const STRIP_MAX_WIDTH = 320;
+const STRIP_MAX_HEIGHT = 480;
 
 let stripWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let quittingExplicitly = false;
+let lastStripDims: { width: number; height: number } = {
+  width: STRIP_WIDTH,
+  height: STRIP_HEIGHT,
+};
 
-function computeStripBounds(): { x: number; y: number; width: number; height: number } {
+function computeStripBounds(
+  width: number = lastStripDims.width,
+  height: number = lastStripDims.height,
+): { x: number; y: number; width: number; height: number } {
   const display = screen.getPrimaryDisplay();
   const { workArea } = display;
-  const x = workArea.x + workArea.width - STRIP_WIDTH - STRIP_EDGE_OFFSET;
-  const y = workArea.y + Math.round((workArea.height - STRIP_HEIGHT) / 2);
-  return { x, y, width: STRIP_WIDTH, height: STRIP_HEIGHT };
+  const x = workArea.x + workArea.width - width - STRIP_EDGE_OFFSET;
+  const y = workArea.y + Math.round((workArea.height - height) / 2);
+  return { x, y, width, height };
 }
 
 function createStripWindow(): BrowserWindow {
@@ -175,8 +187,8 @@ function registerDevCanvasShortcuts(): void {
       dismissCanvas();
       return;
     }
-    showCanvas({
-      componentId: 'dev-moodboard',
+    renderCanvas({
+      component_id: 'dev-moodboard',
       component: 'moodboard',
       props: {
         title: 'Card material',
@@ -209,8 +221,8 @@ function registerDevCanvasShortcuts(): void {
       dismissCanvas();
       return;
     }
-    showCanvas({
-      componentId: 'dev-artifact',
+    renderCanvas({
+      component_id: 'dev-artifact',
       component: 'artifact_preview',
       props: {
         title: 'Mixtape',
@@ -237,8 +249,8 @@ function registerDevCanvasShortcuts(): void {
       dismissCanvas();
       return;
     }
-    showCanvas({
-      componentId: 'dev-rule',
+    renderCanvas({
+      component_id: 'dev-rule',
       component: 'harness_flash',
       props: {
         rule: 'No gradients ever.',
@@ -306,6 +318,21 @@ function registerIpcHandlers(): void {
       };
     },
   );
+
+  // ─── mic.status (W1.hotkey) ──────────────────────────────────────────
+  // Renderer with the peer publishes mic state; rebroadcast so every
+  // window (Strip listening view, Canvas) can reflect it.
+  ipcMain.on(IpcChannel.MicStatus, (evt, payload: MicStatusPayload) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.webContents.id === evt.sender.id) continue;
+      if (win.isDestroyed()) continue;
+      try {
+        win.webContents.send(IpcChannel.MicStatus, payload);
+      } catch (err) {
+        console.warn('[director] mic.status broadcast failed', err);
+      }
+    }
+  });
 }
 
 // ───────────────────────────────────────────────────────────────────────────

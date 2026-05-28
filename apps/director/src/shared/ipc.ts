@@ -69,6 +69,9 @@ export const IpcChannel = {
   AppQuit: 'app.quit',
   AppReady: 'app.ready',
   AppError: 'app.error',
+
+  // ─── window.* (Strip geometry, right-edge anchored in main) ───────────
+  WindowStripResize: 'window.strip.resize',
 } as const;
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel];
@@ -278,6 +281,17 @@ export interface AppErrorPayload {
   recoverable: boolean;
 }
 
+// ─── window.* payloads ───────────────────────────────────────────────────
+
+export interface StripResizeRequest {
+  /** Logical pixel width. */
+  width: number;
+  /** Logical pixel height. */
+  height: number;
+}
+
+export type StripResizeResponse = { ok: true } | { ok: false; error: string };
+
 // ─── Legacy boilerplate types (W1 scaffolding) ───────────────────────────
 
 export interface DormantState {
@@ -315,6 +329,16 @@ export interface DirectorBridge {
     /** Subscribe to async tool results (e.g. agent completions injected
      *  from main → renderer with the peer connection). */
     onResult: (cb: (payload: ToolResultPayload) => void) => () => void;
+  };
+  /** Mic state broadcast (W1.hotkey). The renderer that owns the peer
+   *  publishes mic state; any window can subscribe. */
+  mic: {
+    setStatus: (payload: MicStatusPayload) => void;
+    onStatus: (cb: (payload: MicStatusPayload) => void) => () => void;
+  };
+  /** Strip window geometry control (W2). Main re-anchors to the right edge. */
+  window: {
+    resizeStrip: (dims: StripResizeRequest) => Promise<StripResizeResponse>;
   };
 }
 
@@ -356,6 +380,10 @@ export interface IpcInvokeMap {
   [IpcChannel.ToolCall]: {
     request: ToolCallRequest;
     response: ToolCallResponse;
+  };
+  [IpcChannel.WindowStripResize]: {
+    request: StripResizeRequest;
+    response: StripResizeResponse;
   };
   [IpcChannel.StateSnapshotRequest]: {
     request: void;
