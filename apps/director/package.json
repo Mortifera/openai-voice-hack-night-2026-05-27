@@ -18,7 +18,10 @@
     "@electron-toolkit/preload": "^3.0.1",
     "@electron-toolkit/utils": "^3.0.0",
     "@fontsource/inter": "^5.1.0",
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "dotenv": "^16.4.5",
     "framer-motion": "^11.11.17",
+    "openai": "^4.79.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "zustand": "^5.0.1"
