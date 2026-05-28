@@ -34,9 +34,50 @@ When the system hits a subjective fork or a fatal blocker, it **proactively inte
 
 Voice, visuals, and execution are decoupled. A **Voice Orchestrator** routes spoken intent into commands against a **Central State Machine**. Sub-agents run in a sandboxed async environment, reading the plan, writing files, running tests — and reporting status back to the State Machine. The UI reflects the State Machine; it never talks to agents directly. The GenUI Canvas accepts raw HTML / Mermaid / image strings from the State Machine, so the same interface fluidly becomes a moodboard, a diagram, or a live React app.
 
+## Running locally
+
+### Prerequisites
+- macOS (overlay relies on `NSVisualEffectView` vibrancy)
+- Node 22+, pnpm 10+
+- An **OpenAI API key** with Realtime API access (`gpt-realtime-2`) and Images API (`gpt-image-1`)
+
+### One-time setup
+
+```bash
+pnpm install
+```
+
+### API keys
+
+Director needs an OpenAI API key in `.env` at the **repo root** (never in `apps/director/`, never committed):
+
+```bash
+# .env (at repo root — gitignored)
+OPENAI_API_KEY=sk-proj-...
+```
+
+The main Electron process loads this via `dotenv` and mints short-lived ephemeral Realtime tokens for the renderer — the raw key never reaches the browser context.
+
+Order of precedence (first match wins):
+1. `./.env` (repo root) — primary
+2. `apps/director/.env` (per-app override) — fallback
+
+To verify:
+```bash
+cd apps/director && node -e "require('dotenv').config({path:'../../.env'});console.log(process.env.OPENAI_API_KEY?.slice(0,12))"
+```
+
+### Run
+
+```bash
+pnpm --filter director dev
+```
+
+The Strip appears as a 12×180 pill on the right edge of your primary display, breathing slowly. Press `⌘⇧Space` to summon.
+
 ## Status
 
-Hackathon build in progress. See [`docs/vision.md`](docs/vision.md) for the full product and UX specification.
+Hackathon build in progress. See [`docs/vision.md`](docs/vision.md) for the full product and UX specification, [`docs/ux-design.md`](docs/ux-design.md) for the 7-pass design plan, and [`docs/build-plan.html`](docs/build-plan.html) for the live build dashboard.
 
 ## License
 
