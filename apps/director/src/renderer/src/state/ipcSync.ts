@@ -295,6 +295,38 @@ export function handleCodexEvent(event: CodexEvent): void {
       // v1: noop. Surface in future passes if the Hive UI grows space for them.
       return;
 
+    // ─── § P6.4 hang-watchdog ────────────────────────────────────────
+    // The codex pool's hang watchdog (main/codex-pool-core.ts) emits
+    // this synthetic event when an agent has produced no output for
+    // longer than `DIRECTOR_HANG_THRESHOLD_MS` (default 60s). The
+    // realtime layer separately gets a `tool.proactiveAnnounce` from
+    // the planner; here we just stamp the agent card with a blocker so
+    // the Hive UI surfaces the stuck state next to the agent.
+    case 'agent_hang_suspected': {
+      const existing = useStore.getState().agents[id];
+      if (!existing) {
+        console.warn('[ipcSync] hang_suspected for unknown agent', id);
+        return;
+      }
+      const thresholdMs = (() => {
+        const raw = payload.thresholdMs;
+        return typeof raw === 'number' && raw > 0 ? raw : 60_000;
+      })();
+      const seconds = Math.round(thresholdMs / 1000);
+      commands.updateAgent(id, {
+        blocker: `watchdog: no output ${seconds}s`,
+      });
+      return;
+    }
+
+    // ─── § P6.5 batch-tracking ───────────────────────────────────────
+    // The pool emits `batch_completed` after every agent in a
+    // dispatched batch finishes. The Hive UI doesn't surface batch
+    // state directly today; downstream consumers (worktree-merger)
+    // pick this up via a separate subscription.
+    case 'batch_completed':
+      return;
+
     default: {
       console.warn('[ipcSync] unknown codex event type', event.type);
       return;

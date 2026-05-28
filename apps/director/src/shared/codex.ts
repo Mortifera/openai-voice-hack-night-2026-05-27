@@ -32,9 +32,14 @@ export type CodexEventType =
   | 'turn_completed' // turn.completed (carries token usage)
   | 'agent_finished' // synthetic — pool emits on natural end / abort / error
   // ─── § P6.5 batch-tracking ─────────────────────────────────────────
-  | 'batch_completed'; // synthetic — pool emits when every agent in a
+  | 'batch_completed' // synthetic — pool emits when every agent in a
   // dispatched batch (req.batchId) has reached `agent_finished`.
   // payload: { batchId, worktrees: [{ agentId, path, branch }] }
+  // ─── § P6.4 hang-watchdog ──────────────────────────────────────────
+  | 'agent_hang_suspected'; // synthetic — codex-pool-core's hang
+  // watchdog emits this when an agent has produced no output for
+  // longer than `DIRECTOR_HANG_THRESHOLD_MS` (default 60s).
+  // payload: { thresholdMs: number, lastOutputAt: number, sinceMs: number }
 
 export interface CodexEvent {
   agent_id: AgentId;

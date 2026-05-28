@@ -40,6 +40,9 @@ import {
   queueAgentWrite,
   setLastCanvas,
 } from './side-store.js';
+// § P6.4 hang-watchdog — see EOF marker for wiring.
+import { announceAgentHang } from './planner.js';
+import { setHangAnnouncer } from './codex-pool-core.js';
 
 const ASK_TIMEOUT_MS = 60_000;
 
@@ -459,4 +462,63 @@ export function registerToolRouterIpc(stripWindow: BrowserWindow): void {
   ipcMain.on(CanvasIpcChannel.UserResponse, (_evt, payload) => {
     console.log('[tool-router] canvas.user_response', payload);
   });
+
+  // § P6.4 hang-watchdog: register the announcer so the codex pool's
+  // hang watchdog can drive the planner's proactive narration helper.
+  // Wired here (not in codex-pool wrapper) because the tool router is
+  // the natural seam between the codex layer and the planner layer.
+  wireHangAnnouncer();
+}
+
+// ─── § P6.4 hang-watchdog wiring (Main) ────────────────────────────────
+// Append-only marker per docs/contracts.md § 13.1. The codex pool's
+// hang watchdog (`codex-pool-core.ts § P6.4 hang-watchdog`) calls into
+// this announcer when an agent has produced no output for the
+// configured threshold. We forward to the planner's
+// `announceAgentHang(...)` helper which broadcasts a
+// `ToolProactiveAnnounce` to the strip renderer so realtime can speak.
+//
+// We also use the same hook to publish a `codex.event`-shaped state
+// patch into the renderer's store via the existing CodexEvent channel.
+// The watchdog already emits a synthetic `agent_hang_suspected` event
+// through `onEvent`, which the renderer's `ipcSync.ts` codex-event
+// handler maps to `commands.updateAgent(id, { blocker: ... })`. So this
+// announcer's only job is the voice-side surfacing.
+//
+// Defensive: if either the strip window or the planner module is gone
+// (test teardown, hot reload), the handler logs + no-ops.
+
+let hangAnnouncerCleanup: (() => void) | null = null;
+
+function wireHangAnnouncer(): void {
+  if (hangAnnouncerCleanup) {
+    try {
+      hangAnnouncerCleanup();
+    } catch (err) {
+      console.warn('[tool-router] previous hang-announcer cleanup threw', err);
+    }
+    hangAnnouncerCleanup = null;
+  }
+  hangAnnouncerCleanup = setHangAnnouncer((agentId) => {
+    try {
+      announceAgentHang(agentId, ctx.stripWindow);
+    } catch (err) {
+      console.warn(
+        '[tool-router] hang announcer planner forward failed',
+        err instanceof Error ? err.message : err,
+      );
+    }
+  });
+}
+
+/** Test-only — clear the registered hang announcer. */
+export function _unwireHangAnnouncerForTests(): void {
+  if (hangAnnouncerCleanup) {
+    try {
+      hangAnnouncerCleanup();
+    } catch {
+      /* ignore */
+    }
+    hangAnnouncerCleanup = null;
+  }
 }

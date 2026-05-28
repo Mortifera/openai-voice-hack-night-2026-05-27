@@ -788,3 +788,87 @@ export function _resetSystemInjectionsForTests(): void {
 export function _peekSystemInjectionsForTests(): readonly string[] {
   return pendingSystemInjections.slice();
 }
+
+// ─── § P6.4 hang-announce (Main — proactive narration) ─────────────────
+// Append-only marker per docs/contracts.md § 13.1. Hooked from
+// `tool-router.ts` (which subscribes to the codex pool's hang event via
+// `setHangAnnouncer(...)`). The router calls `announceAgentHang(...)`
+// with the offending agent id + the strip BrowserWindow; we publish a
+// `ToolProactiveAnnounce` payload onto the existing realtime
+// announcement IPC so the realtime layer can speak it.
+//
+// We deliberately DO NOT route this through the Responses API — the
+// hang escalation should fire instantly so the user hears the prompt
+// while the watchdog stopwatch is still warm; a full planner consult
+// would add seconds of latency. The router still has the option to
+// kick off a planner consult separately if a deeper escalation is
+// needed.
+//
+// Defensive: a missing / destroyed strip window is a no-op + warn. We
+// never throw — the announcer is invoked inside the watchdog interval
+// and a thrown error would surface as an unhandled rejection.
+
+const HANG_AGENT_NAMES: Record<string, string> = {
+  maya: 'Maya',
+  jin: 'Jin',
+  cleo: 'Cleo',
+  wren: 'Wren',
+};
+
+function displayAgentName(agentId: string): string {
+  const slug = agentId.trim().toLowerCase();
+  return (
+    HANG_AGENT_NAMES[slug] ??
+    (slug.length > 0 ? slug.charAt(0).toUpperCase() + slug.slice(1) : agentId)
+  );
+}
+
+/**
+ * Publish the "agent seems stuck — kill or extend?" proactive
+ * announcement. Fire-and-forget. The tool-router calls this from inside
+ * the codex pool's hang announcer hook.
+ *
+ * @param agentId — the slug of the suspected-hanging agent
+ * @param mainWindow — strip BrowserWindow used to broadcast the IPC
+ */
+export function announceAgentHang(
+  agentId: string,
+  mainWindow: BrowserWindow | null,
+): void {
+  if (!agentId || typeof agentId !== 'string') {
+    console.warn(
+      '[planner] announceAgentHang dropped — missing / wrong-typed agentId',
+      agentId,
+    );
+    return;
+  }
+  const name = displayAgentName(agentId);
+  const text = `${name} seems stuck. Kill or give more time?`;
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    console.warn(
+      '[planner] announceAgentHang fired with no strip window — dropping',
+      { agentId, text },
+    );
+    return;
+  }
+  try {
+    mainWindow.webContents.send(IpcChannel.ToolProactiveAnnounce, {
+      text,
+      reason: 'agent_blocked',
+      metadata: {
+        kind: 'agent_hang_suspected',
+        agentId,
+      },
+    });
+  } catch (err) {
+    console.warn(
+      '[planner] announceAgentHang IPC send threw',
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/** Test-only — build the announcement text without performing IPC. */
+export function _buildHangAnnouncementForTests(agentId: string): string {
+  return `${displayAgentName(agentId)} seems stuck. Kill or give more time?`;
+}

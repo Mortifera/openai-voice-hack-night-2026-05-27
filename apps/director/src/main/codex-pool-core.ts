@@ -562,6 +562,14 @@ function wrapEmitForBatch(
   innerEmit: EmitFn,
   ev: CodexEvent,
 ): void {
+  // § P6.4 hang-watchdog: observe every emit BEFORE forwarding so that
+  // even if `innerEmit` throws we still reset the per-agent stopwatch.
+  // The watchdog auto-starts lazily on first observation (see EOF marker).
+  try {
+    notifyEmitForHangWatchdog(agentId, innerEmit);
+  } catch (err) {
+    console.warn('[codex-pool-core] hang-watchdog notify threw', err);
+  }
   // Forward first — never let batch bookkeeping prevent the renderer
   // from seeing the underlying event.
   try {
@@ -643,4 +651,277 @@ export function getBatchSnapshot(batchId: string): {
     })),
     emitted: batch.emitted,
   };
+}
+
+// ─── § P6.4 hang-watchdog ──────────────────────────────────────────────
+//
+// Phase 6.4 (`docs/remaining-phases.md` § 6.4): per-agent stopwatch that
+// fires a synthetic `agent_hang_suspected` event when an agent has
+// produced no output for longer than `DIRECTOR_HANG_THRESHOLD_MS`
+// (default 60_000ms). The synthetic event flows through the same
+// `onEvent` callback the rest of the pool uses — so the renderer's
+// `codex.event` handler picks it up identically. A separately registered
+// `hangAnnouncer` callback is invoked on main-side as well so the tool
+// router can forward to the planner's proactive announcement helper.
+//
+// Configuration:
+//   - DIRECTOR_HANG_THRESHOLD_MS — env var (default 60_000)
+//   - DIRECTOR_HANG_INTERVAL_MS  — env var (default min(thresholdMs/4, 15_000))
+//
+// Lifecycle:
+//   - `wrapEmitForBatch` calls `notifyEmitForHangWatchdog(agentId, emit)`
+//     on every observed event. The first call captures the emit
+//     reference + arms a single setInterval. Idempotent — subsequent
+//     calls only refresh `lastOutputAt` for the agent.
+//   - When `now - lastOutputAt > thresholdMs`, the watchdog emits the
+//     synthetic event AND calls the registered `hangAnnouncer`. The
+//     `hangFired` flag is then set so we don't spam — it clears the next
+//     time `notifyEmitForHangWatchdog` is called for that agent (next
+//     real output) OR when `resetHangStopwatch(agentId)` is called
+//     (planner's "more time" response).
+//
+// Tests inject low thresholds via `setupHangWatchdogForTests` — that
+// helper bypasses env vars + allows the emit reference + clock to be
+// supplied directly so a unit test never needs to drive `wrapEmitFor
+// Batch`.
+
+const HANG_THRESHOLD_DEFAULT_MS = 60_000;
+
+interface HangWatchdogState {
+  emit: EmitFn | null;
+  thresholdMs: number;
+  intervalMs: number;
+  interval: ReturnType<typeof setInterval> | null;
+  lastOutputAt: Map<AgentId, number>;
+  hangFired: Set<AgentId>;
+  announcer: ((agentId: AgentId) => void | Promise<void>) | null;
+  now: () => number;
+}
+
+function readEnvNumber(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
+
+function defaultThresholdMs(): number {
+  return readEnvNumber('DIRECTOR_HANG_THRESHOLD_MS', HANG_THRESHOLD_DEFAULT_MS);
+}
+
+function defaultIntervalMs(thresholdMs: number): number {
+  // Sample at thresholdMs/4 by default, clamped to [50ms, 15_000ms] so
+  // tests with a 200ms threshold still tick under the threshold but the
+  // production 60s threshold doesn't churn a wakeup every 15s.
+  const envOverride = readEnvNumber('DIRECTOR_HANG_INTERVAL_MS', 0);
+  if (envOverride > 0) return envOverride;
+  const computed = Math.max(50, Math.min(Math.floor(thresholdMs / 4), 15_000));
+  return computed;
+}
+
+const hangState: HangWatchdogState = {
+  emit: null,
+  thresholdMs: defaultThresholdMs(),
+  intervalMs: defaultIntervalMs(defaultThresholdMs()),
+  interval: null,
+  lastOutputAt: new Map(),
+  hangFired: new Set(),
+  announcer: null,
+  now: () => Date.now(),
+};
+
+function ensureHangWatchdogStarted(): void {
+  if (hangState.interval) return;
+  hangState.interval = setInterval(checkHangWatchdog, hangState.intervalMs);
+  // Allow Node to exit even if this interval is the only thing alive
+  // (matters for tests + the headless dogfood CLI).
+  if (typeof hangState.interval.unref === 'function') {
+    hangState.interval.unref();
+  }
+}
+
+function checkHangWatchdog(): void {
+  if (!hangState.emit && !hangState.announcer) return;
+  const now = hangState.now();
+  for (const [agentId, lastAt] of hangState.lastOutputAt.entries()) {
+    if (hangState.hangFired.has(agentId)) continue;
+    const sinceMs = now - lastAt;
+    if (sinceMs <= hangState.thresholdMs) continue;
+    hangState.hangFired.add(agentId);
+    const event: CodexEvent = {
+      agent_id: agentId,
+      type: 'agent_hang_suspected',
+      payload: {
+        thresholdMs: hangState.thresholdMs,
+        lastOutputAt: lastAt,
+        sinceMs,
+      },
+      at: now,
+    };
+    if (hangState.emit) {
+      try {
+        hangState.emit(event);
+      } catch (err) {
+        console.warn('[codex-pool-core] hang-watchdog emit threw', err);
+      }
+    }
+    if (hangState.announcer) {
+      try {
+        const ret = hangState.announcer(agentId);
+        if (ret && typeof (ret as Promise<unknown>).catch === 'function') {
+          (ret as Promise<unknown>).catch((err) =>
+            console.warn(
+              '[codex-pool-core] hang-watchdog announcer rejected',
+              err,
+            ),
+          );
+        }
+      } catch (err) {
+        console.warn(
+          '[codex-pool-core] hang-watchdog announcer threw',
+          err,
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Called from `wrapEmitForBatch` on every event the pool surfaces. Pure
+ * side-effect: updates `lastOutputAt`, clears the `hangFired` flag, and
+ * lazily starts the watchdog interval. Capturing the emit function from
+ * the first observation means consumers don't need to wire anything up
+ * — the wrapper file just calls `dispatchAgentCore(..., emit)` as it
+ * always has.
+ *
+ * Exported so tests can drive the notification directly without going
+ * through `wrapEmitForBatch`.
+ */
+export function notifyEmitForHangWatchdog(
+  agentId: AgentId,
+  emit: EmitFn,
+): void {
+  if (!agentId || typeof agentId !== 'string') return;
+  if (!hangState.emit && typeof emit === 'function') {
+    hangState.emit = emit;
+  }
+  hangState.lastOutputAt.set(agentId, hangState.now());
+  hangState.hangFired.delete(agentId);
+  ensureHangWatchdogStarted();
+}
+
+/**
+ * Register the main-side hang announcer. The tool-router wires this so
+ * the planner can publish the "Maya seems stuck — kill or extend?"
+ * proactive announcement when the watchdog fires. Returns a teardown
+ * that clears the announcer.
+ */
+export function setHangAnnouncer(
+  fn: ((agentId: AgentId) => void | Promise<void>) | null,
+): () => void {
+  hangState.announcer = fn;
+  return () => {
+    if (hangState.announcer === fn) hangState.announcer = null;
+  };
+}
+
+/**
+ * Re-arm the stopwatch for a specific agent without piping a real event
+ * through. Used when the user says "more time" — the planner can bump
+ * the threshold (caller's responsibility) and ping notify here so the
+ * watchdog doesn't immediately re-fire.
+ */
+export function resetHangStopwatch(agentId: AgentId): void {
+  hangState.lastOutputAt.set(agentId, hangState.now());
+  hangState.hangFired.delete(agentId);
+}
+
+/** Test-only: drop every entry + clear the interval so cases stay isolated. */
+export function _resetHangWatchdogForTests(): void {
+  if (hangState.interval) {
+    clearInterval(hangState.interval);
+    hangState.interval = null;
+  }
+  hangState.emit = null;
+  hangState.announcer = null;
+  hangState.lastOutputAt.clear();
+  hangState.hangFired.clear();
+  hangState.thresholdMs = defaultThresholdMs();
+  hangState.intervalMs = defaultIntervalMs(hangState.thresholdMs);
+  hangState.now = () => Date.now();
+}
+
+/**
+ * Test/lifecycle helper: configure the watchdog with explicit thresholds
+ * and (optionally) an injected emit + clock. Returns a teardown.
+ *
+ * Production code does NOT need to call this — `notifyEmitForHangWatchdog`
+ * captures the emit reference + reads `DIRECTOR_HANG_THRESHOLD_MS` from
+ * env on first observation. Tests use it to bypass env vars and inject
+ * a controllable clock.
+ */
+export function setupHangWatchdogForTests(opts: {
+  emit?: EmitFn;
+  thresholdMs?: number;
+  intervalMs?: number;
+  now?: () => number;
+  announcer?: (agentId: AgentId) => void | Promise<void>;
+}): { stop: () => void } {
+  _resetHangWatchdogForTests();
+  if (typeof opts.thresholdMs === 'number' && opts.thresholdMs > 0) {
+    hangState.thresholdMs = opts.thresholdMs;
+    hangState.intervalMs = defaultIntervalMs(opts.thresholdMs);
+  }
+  if (typeof opts.intervalMs === 'number' && opts.intervalMs > 0) {
+    hangState.intervalMs = opts.intervalMs;
+  }
+  if (typeof opts.now === 'function') {
+    hangState.now = opts.now;
+  }
+  if (opts.emit) {
+    hangState.emit = opts.emit;
+  }
+  if (opts.announcer) {
+    hangState.announcer = opts.announcer;
+  }
+  return {
+    stop: () => {
+      if (hangState.interval) {
+        clearInterval(hangState.interval);
+        hangState.interval = null;
+      }
+    },
+  };
+}
+
+/** Diagnostic snapshot — for tests + future tooling. */
+export function getHangWatchdogSnapshot(): {
+  thresholdMs: number;
+  intervalMs: number;
+  running: boolean;
+  agents: Array<{
+    agentId: AgentId;
+    lastOutputAt: number;
+    fired: boolean;
+  }>;
+} {
+  return {
+    thresholdMs: hangState.thresholdMs,
+    intervalMs: hangState.intervalMs,
+    running: hangState.interval !== null,
+    agents: Array.from(hangState.lastOutputAt.entries()).map(([id, at]) => ({
+      agentId: id,
+      lastOutputAt: at,
+      fired: hangState.hangFired.has(id),
+    })),
+  };
+}
+
+/**
+ * Force a check tick — only for tests that want to advance the virtual
+ * clock and assert behavior without waiting on `setInterval`.
+ */
+export function _tickHangWatchdogForTests(): void {
+  checkHangWatchdog();
 }
