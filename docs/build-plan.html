@@ -116,6 +116,12 @@ h2 .note { color: var(--text-3); font-weight: 400; text-transform: none; letter-
 }
 .bar:hover { filter: brightness(1.15); transform: translateY(-1px); z-index: 4; }
 .bar.crit { box-shadow: inset 0 0 0 1px rgba(242,107,92,0.6); border-color: rgba(242,107,92,0.6); }
+.bar.done { background: rgba(88,214,141,0.32) !important; border-color: rgba(88,214,141,0.7) !important; color: var(--text); }
+.bar.done::after { content: " ✓"; color: var(--green); }
+.bar.in-flight { background: rgba(110,148,232,0.22) !important; border-color: rgba(110,148,232,0.6) !important; }
+.bar.in-flight::after { content: " ▸"; color: var(--blue); }
+.task.done .body strong::after { content: " · ✓"; color: var(--green); font-weight: 400; }
+.task.in-flight .body strong::after { content: " · ▸ in flight"; color: var(--blue); font-weight: 400; font-size: 11px; }
 
 /* Lane colour families — used per workstream */
 .lane-w1 .bar { background: rgba(110,148,232,0.16); border-color: rgba(110,148,232,0.45); }
@@ -242,17 +248,44 @@ footer { margin-top: 40px; text-align: center; color: var(--text-3); font-size: 
 
 <header>
   <div>
-    <h1>Director — 60-minute Build Plan</h1>
-    <div class="sub">5 parallel workers · 27 dispatch units · Mixtape demo · OpenAI Voice Hackathon</div>
+    <h1>Director — Build Plan <span style="color:var(--amber);font-size:14px;font-weight:500;margin-left:8px;">🔥 CRUNCH MODE</span></h1>
+    <div class="sub">T+33min elapsed · ~20min remaining · Critical path locked · Mixtape demo</div>
   </div>
   <div class="spacer"></div>
   <div class="clock">
     <label>Elapsed</label>
-    <span id="elapsed">00:00</span>
-    <button id="startBtn">Start</button>
+    <span id="elapsed">33:00</span>
+    <button id="startBtn">Resume</button>
     <button id="resetBtn">Reset</button>
   </div>
 </header>
+
+<div style="background:linear-gradient(135deg,rgba(242,107,92,0.08),rgba(242,107,92,0.02));border:1px solid rgba(242,107,92,0.3);border-radius:14px;padding:18px 24px;margin-bottom:24px;">
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+    <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--crit);background:rgba(242,107,92,0.18);padding:3px 8px;border-radius:5px;">CRUNCH PATH · 20MIN</span>
+    <span style="color:var(--text-2);font-size:13px;">If only these 5 land, we still demo.</span>
+  </div>
+  <ol style="margin:8px 0 0;padding-left:20px;color:var(--text);font-size:13px;line-height:1.7;">
+    <li><strong>W1 finish</strong> — session.update + tool routing (~6 min) → Realtime can call tools</li>
+    <li><strong>W3 tool-router</strong> — already in flight (~5 min) → tool calls become store mutations</li>
+    <li><strong>W2 wire state transitions</strong> — already in flight (~5 min) → state mutations animate Strip</li>
+    <li><strong>W4 channel-migration</strong> — already in flight (~3 min) → Canvas opens on render_canvas</li>
+    <li><strong>End-to-end smoke test</strong> — say "build mixtape" → see Hive → see Moodboard → see ArtifactPreview (~2 min)</li>
+  </ol>
+</div>
+
+<h2>Cuts for crunch (DROP these — don't even try)</h2>
+<div class="cuts" style="background:rgba(224,120,102,0.06);border-color:rgba(224,120,102,0.3);">
+  <ul>
+    <li><strong>W1.hotkey + W1.barge</strong> — basic toggle works; smart-key tap-vs-hold + barge-in cancel are polish. Cut.</li>
+    <li><strong>W3.escalation-event server-initiated speech</strong> — too tightly coupled to W1's RealtimeClient. Cut: presenter narrates what Director would say at the blocker beat. Sim still fires amber pulse + chime.</li>
+    <li><strong>W2.window-resize, W2.visual-polish</strong> — Strip can stay one size. Polish is post-demo.</li>
+    <li><strong>W4.positioning, W4.dismiss-handling</strong> — Canvas opens centered (fixed); manual ⌘⇧0 dismiss works.</li>
+    <li><strong>W5 finish-mixtape</strong> — keep ArtifactPreview as static React mockup. No iframe. Already gorgeous.</li>
+    <li><strong>Audio cue synthesis</strong> — visual demo without audio cues is fine. Cut.</li>
+    <li><strong>AGENTS.md personas</strong> — post-demo.</li>
+  </ul>
+</div>
 
 <h2>Gantt <span class="note">Each colored bar = one chunky dispatch unit. Red border = critical path. Hover for detail.</span></h2>
 <div class="gantt">
