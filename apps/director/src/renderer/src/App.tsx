@@ -65,7 +65,11 @@ export function App(): JSX.Element {
   }, [realtimeStatus]);
 
   // Open the Realtime peer when the shell mounts so voice/text is ready.
+  // GATED to the strip surface only — the chat-debug window must NEVER auto-connect.
+  // Two simultaneous Realtime peers would grab mic twice and produce overlapping AI audio.
+  // See W4 P2 anomaly note + Main cross-cutting fix.
   useEffect(() => {
+    if (surface !== 'strip') return;
     if (client.status !== 'idle') return;
     let cancelled = false;
     client.connect().catch((err) => {
@@ -76,7 +80,7 @@ export function App(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [client]);
+  }, [client, surface]);
 
   // Keep the newest transcript turn pinned in view.
   useEffect(() => {
@@ -84,7 +88,11 @@ export function App(): JSX.Element {
   }, [messages]);
 
   // Bridge global hotkey from main process (W1).
+  // GATED to strip surface only — the global hotkey fires IPC to BOTH windows
+  // (strip + chat-debug). Without this gate, both would react and we'd double-
+  // grab the mic + double-fire Realtime responses.
   useEffect(() => {
+    if (surface !== 'strip') return;
     const bridge = window.director;
     if (!bridge) return;
     return bridge.onHotkey(() => {
@@ -107,7 +115,7 @@ export function App(): JSX.Element {
         console.log(`[realtime] mic → ${next}`);
       }
     });
-  }, [client]);
+  }, [client, surface]);
 
   // ── Drive stripState from real Realtime events ─────────────────────────
   //
