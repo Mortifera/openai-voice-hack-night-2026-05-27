@@ -170,10 +170,11 @@ function registerGlobalHotkey(): void {
   }
 
   // ─── Dev keystrokes — manual Canvas QA without the Realtime layer. ────
-  // Cmd+Shift+4 → toggle Mixtape moodboard
-  // Cmd+Shift+5 → toggle Mixtape artifact reveal
-  // Cmd+Shift+6 → toggle Harness rule-save flash
-  // Cmd+Shift+0 → dismiss Canvas
+  // Cmd+Opt+M → toggle Mixtape moodboard
+  // Cmd+Opt+A → toggle Mixtape artifact reveal
+  // Cmd+Opt+H → toggle Harness rule-save flash
+  // Cmd+Opt+X → dismiss Canvas
+  // (Cmd+Shift+3-6 are reserved by macOS for screenshots — avoided.)
   if (is.dev) {
     registerDevCanvasShortcuts();
   }
@@ -263,10 +264,10 @@ function registerDevCanvasShortcuts(): void {
     });
   };
 
-  globalShortcut.register('CommandOrControl+Shift+4', toggleMoodboard);
-  globalShortcut.register('CommandOrControl+Shift+5', toggleArtifact);
-  globalShortcut.register('CommandOrControl+Shift+6', toggleRule);
-  globalShortcut.register('CommandOrControl+Shift+0', () => dismissCanvas());
+  globalShortcut.register('CommandOrControl+Alt+M', toggleMoodboard);
+  globalShortcut.register('CommandOrControl+Alt+A', toggleArtifact);
+  globalShortcut.register('CommandOrControl+Alt+H', toggleRule);
+  globalShortcut.register('CommandOrControl+Alt+X', () => dismissCanvas());
 }
 
 function registerIpcHandlers(): void {
