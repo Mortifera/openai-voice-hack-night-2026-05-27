@@ -344,6 +344,155 @@ Geometry:
 - Söhne family (paid license) replaces Inter / JetBrains Mono once funded
 - Light mode added (vibrancy materials switch to `.popover` light variant)
 
-## Pass 6 — Responsive & Accessibility ⏳
+## Pass 6 — Responsive & Accessibility ✅
 
-## Pass 7 — Unresolved Design Decisions ⏳
+### Display + window behavior
+
+| Concern | Decision |
+|---|---|
+| Multi-monitor | Strip lives on primary display (the one with the menu bar). No migration. |
+| Notch (MacBook Pro 14/16) | N/A — Strip is on right edge, not top. No collision. |
+| Dock on right edge | Strip slides 20px left of dock (detect via `screen.getPrimaryDisplay().workArea.x + width`). |
+| Fullscreen apps | Strip stays visible via `alwaysOnTop: 'screen-saver'` level + `setVisibleOnAllWorkspaces(true)`. |
+| Mission Control | Strip visible but excluded from window cycler (`setExcludedFromShownWindowsMenu(true)`). |
+| Multiple Spaces | Strip follows the user across all Spaces. |
+| Display scaling (Retina / external) | CSS pixels — natural scaling. Test on 1x, 2x, 3x DPR. |
+| Window resize / re-arrangement | Strip re-anchors to right edge on `display-metrics-changed`. |
+
+### Keyboard navigation
+
+| Surface | Keyboard contract |
+|---|---|
+| Strip (no Canvas open) | `⌘⇧Space` summon (Pass 2). `⌘⇧M` mute mic. `⌘.` stop current work. `⌘Q` quit (via tray). |
+| Canvas open | `Tab` cycles interactive elements. `Arrow keys` navigate within (`options_picker`, `moodboard`). `Enter` commits selection. `Esc` dismisses Canvas (fires `canvas_response({ dismissed: true })`). |
+| Forms in Canvas | Standard form keyboard. `⌘Enter` submits. `Tab` cycles fields. |
+| `code_preview` | `Y` approve, `N` reject, `R` request changes (when shown). |
+
+### Focus indicator
+
+2px ring in `--status-thinking` (#6E94E8) with 4px offset on all focusable elements. Never just `outline: none`.
+
+### Screen reader (VoiceOver)
+
+- Strip: `role="status"`, `aria-live="polite"`, label describes current state ("Listening", "Maya is working on PlaylistCard", "Director thinking").
+- Hive nodes: `role="status"` per row, label = `"Maya, Frontend, working, wiring the flip animation"`.
+- Canvas: `role="dialog"`, `aria-modal="true"` (focus trap inside Canvas while open).
+- `options_picker`: `role="radiogroup"`, each option `role="radio"`.
+- `form`: native form semantics + `aria-required` on required fields.
+- AI narration: optional live region (deferred to caption toggle, see below).
+
+### Contrast
+
+- `--text-primary` (`#ECECF0`) on `--surface-elevated` (over vibrancy): targets **WCAG AA 4.5:1**. Real contrast varies with wallpaper underneath vibrancy — mitigation: text-shadow `0 1px 2px rgba(0,0,0,0.4)` on all surface text to preserve readability across light wallpapers.
+- Status colors checked individually:
+  - `--status-working` #58D68D on dark surface: ≥7:1 ✅
+  - `--status-blocked` #E8A95C on dark: ≥7:1 ✅
+  - `--status-thinking` #6E94E8 on dark: ≥4.5:1 ✅
+  - `--status-error` #E07866 on dark: ≥4.5:1 ✅
+- Agent accent colors on text: all ≥4.5:1 on `--surface-elevated`.
+
+### Reduced motion
+
+Honor `prefers-reduced-motion: reduce` strictly:
+- Springs → instant or 80ms linear fade
+- Slide animations → cross-fade in `--duration-quick`
+- Pulses → static dimmed fill instead of cycling
+- Canvas open → instant (no spring expansion)
+- Voice halo resolution → soft fill instead of expanding ring
+
+### Font scaling
+
+Inter scales to user's preferred text size. Detect via `window.matchMedia('(prefers-larger-text)')` (Safari) or read from Electron's accessibility preferences. Scale base font 1.0x → 1.25x. Spacing scale follows.
+
+### Touch / trackpad
+
+- Trackpad click hit targets ≥36px (all current rows >70px, safe).
+- Two-finger swipe right on Canvas → dismiss (matches macOS gesture grammar).
+- Hover-to-peek on Strip respects `pointer: fine` (mouse only, not trackpad gesture).
+
+### Captions (deferred to phase 2)
+
+Visible mirror of Director's narration as subtitled text on the Strip. Critical for deaf/HoH users and noisy environments. **Phase 2 work** — adds a Preferences toggle and a small caption track that fades sentences in/out below the Strip. Logged in Pass 7 TODOs.
+
+### What's NOT in scope
+
+- Windows / Linux a11y conventions (not yet)
+- High-contrast mode override (relies on system contrast for now)
+- Touch screen support (Mac → not applicable)
+- Localization / RTL languages (English-only v1)
+
+## Pass 7 — Unresolved Design Decisions ✅
+
+### Resolved decisions
+
+| ID | Decision |
+|---|---|
+| 7A-1 | **`⌘.` semantics — tiered.** Tap = soft stop (Director stops talking, agents continue). Hold = hard stop (agents wrap at next checkpoint). Double-tap = panic (immediate kill, worktrees preserved). |
+| 7B-1 | **DND mode — auto-honor macOS Focus.** When any macOS Focus is enabled, escalations queue silently (amber Strip pulse + tray badge). User summons to drain the queue. No new toggle. |
+| 7C-1 | **Hotkey conflict detection on first launch.** App tests `⌘⇧Space` registration. If blocked (Spotlight on some setups, third-party tools), open a Canvas `options_picker` offering 3 alternative chords (`⌥Space`, `⌘⇧;`, `⌘⌥D`). User picks; choice persists. |
+| — | **Voice/click race window**: 200ms. Click wins ties. |
+| — | **Multi-canvas calls**: most-recent-wins with cross-fade; if prior was interactive, auto-fires `canvas_response({ dismissed: true })`. |
+| — | **Dormant Strip hover-peek**: 800ms hover → `⌘⇧Space` hint fades in; mouse-leave fades it out. |
+| — | **Agent naming beyond Mixtape**: pool of 16 candidates auto-assigned by role hash. User can rename via voice. |
+| — | **Worktree cleanup**: persist by default; manual "Clean session worktrees" in tray. |
+| — | **Mic permission**: macOS native prompt first; Canvas `form` only on denial. |
+| — | **Captions**: deferred entirely to phase 2. |
+| — | **Presenter / debug mode**: deferred. |
+
+### Not in scope (explicitly deferred)
+
+| Item | Why deferred | When |
+|---|---|---|
+| Light mode | Vibrancy + dark feels Mac-native; light mode is a polish item | Post-hackathon |
+| Captions / live transcript | Critical for deaf/HoH and noisy environments; nontrivial implementation | Phase 2 |
+| Söhne font licensing | Inter is free, perceptually adjacent for hack night | Post-hackathon if monetized |
+| Windows / Linux | Mac-only v1 locked | Post-hackathon if community wants it |
+| Conversational onboarding | Minimal-seed onboarding ships v1; conversational welcome (3A-4) is the next iteration | Phase 2 |
+| Localization / RTL | English-only v1 | Post-hackathon |
+| Always-listening with wake word | Push-to-talk locked v1 (2A-1); requires local wake-word model and continuous mic | Phase 2 |
+| Pair / observer mode | Single user locked | Phase 3 |
+| Pencil-driven theme overrides | Hackathon ships fixed token set | Phase 2 |
+
+### What already exists (leveraged from prior research)
+
+- `docs/vision.md` — aesthetic POV, three UI states, persona DNA
+- `docs/research/genui-schema.md` — 7 prebuilt Canvas components + raw-HTML escape hatch
+- `docs/research/genui-interaction-modes.md` — voice/click duality, prose components, race rules
+- `docs/research/gpt-realtime-2.md` — Realtime API: preamble, thinking phase, 60-min cap, proactive escalation pattern
+- `docs/research/compaction.md` — orchestrator memory is opaque, side store is source of truth
+- `docs/research/codex-for-everything.md` — `@openai/codex-sdk` exists, `AGENTS.md` per worktree carries agent identity
+- `docs/research/demo-target-app.md` — Mixtape concrete demo scenario
+
+### TODOS.md items (logged separately)
+
+See `TODOS.md` at repo root.
+
+---
+
+## Completion Summary
+
+```
++====================================================================+
+|         DESIGN PLAN REVIEW — COMPLETION SUMMARY                    |
++====================================================================+
+| System Audit         | No DESIGN.md prior; high UI scope; vision +
+|                      | research docs provided strong POV
+| Step 0               | Initial 4/10; focus: full 7-pass per user brief
+| Pass 1  (Info Arch)  | 3/10 → 9/10 (Strip ↔ Canvas resolved 1B)
+| Pass 2  (States)     | 2/10 → 9/10 (PTT 2A-1, session 2B-1, full state matrix)
+| Pass 3  (Journey)    | 2/10 → 9/10 (onboarding 3A-1, harness 3B-1, resume 3C-1)
+| Pass 4  (AI Slop)    | 3/10 → 9/10 (naming 4A-1, identity depth 4B-1)
+| Pass 5  (Design Sys) | 1/10 → 8/10 (inline DESIGN.md; tokens defined)
+| Pass 6  (Responsive) | 2/10 → 8/10 (multi-display + a11y + reduced motion)
+| Pass 7  (Decisions)  | 3 resolved (7A, 7B, 7C); 8 auto-decided; 9 deferred
++--------------------------------------------------------------------+
+| NOT in scope         | written (9 items)
+| What already exists  | written (7 sources)
+| TODOS.md updates     | to be written (separate file)
+| Decisions made       | 14 added to plan
+| Decisions deferred   | 9 (listed above)
+| Overall design score | 4/10 → 8/10
++====================================================================+
+```
+
+Plan is design-complete for hackathon shipping. Pencil mockups next.
