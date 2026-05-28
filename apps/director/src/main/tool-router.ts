@@ -34,6 +34,12 @@ import {
 } from '../shared/ipc.js';
 import { renderCanvas } from './canvas.js';
 import { consultDirector, type ConsultArgs } from './planner.js';
+import {
+  appendDecision,
+  appendHarnessRule,
+  queueAgentWrite,
+  setLastCanvas,
+} from './side-store.js';
 
 const ASK_TIMEOUT_MS = 60_000;
 
@@ -162,6 +168,10 @@ async function handleRenderCanvas(
   // Drive the actual Canvas BrowserWindow.
   renderCanvas(showPayload);
 
+  // Record last canvas state in side-store so the planner sees it
+  // in readWorldState() context. Synchronous setter.
+  setLastCanvas(args.component, props);
+
   // Re-broadcast on the main bus for any other observer (logging, state
   // mirror) — the wire string matches `CanvasIpcChannel.Render`.
   for (const w of BrowserWindow.getAllWindows()) {
@@ -215,6 +225,15 @@ async function handleDispatchAgentMock(
   };
 
   sendStripPatch('agents', { action: 'addAgent', agent });
+
+  // Persist agent snapshot to disk (debounced 100ms — non-blocking).
+  // Fire-and-forget the decision log.
+  queueAgentWrite(agent);
+  appendDecision({
+    at: Date.now(),
+    kind: 'agent_dispatched',
+    payload: { agent_id: agentId, name: identity.name, role: identity.role, task: args.task },
+  }).catch((err) => console.warn('[tool-router] decision log failed', err));
 
   // First dispatch kicks the sim in canonical mode. The sim runs trail
   // updates, the T+1:45 Jin block, and the staggered completions.
@@ -326,6 +345,21 @@ async function handleUpdateHarness(
     scope: 'project' as const,
     source: 'user-utterance' as const,
   };
+
+  // Persist to disk FIRST (durability before UI). If disk fails, we still
+  // patch the store + flash the canvas — the rule is in-memory but the
+  // user is informed via the log.
+  try {
+    await appendHarnessRule(rule);
+    await appendDecision({
+      at: Date.now(),
+      kind: 'harness_rule',
+      payload: { rule: args.rule, why: args.why, id: rule.id },
+    });
+  } catch (err) {
+    console.warn('[tool-router] side-store harness write failed', err);
+  }
+
   sendStripPatch('harness', { action: 'addHarnessRule', rule });
 
   // Flash the harness_rule_save Canvas card (1.2s).
