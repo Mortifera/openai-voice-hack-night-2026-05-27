@@ -30,7 +30,11 @@ export type CodexEventType =
   | 'tool_call' // item.*, item.type ∈ {mcp_tool_call, web_search, todo_list}
   | 'error' // item.type=error OR turn.failed OR error event
   | 'turn_completed' // turn.completed (carries token usage)
-  | 'agent_finished'; // synthetic — pool emits on natural end / abort / error
+  | 'agent_finished' // synthetic — pool emits on natural end / abort / error
+  // ─── § P6.5 batch-tracking ─────────────────────────────────────────
+  | 'batch_completed'; // synthetic — pool emits when every agent in a
+  // dispatched batch (req.batchId) has reached `agent_finished`.
+  // payload: { batchId, worktrees: [{ agentId, path, branch }] }
 
 export interface CodexEvent {
   agent_id: AgentId;

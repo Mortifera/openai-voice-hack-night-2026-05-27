@@ -42,6 +42,13 @@ export interface DispatchAgentRequest {
   targetRepo: string;
   /** Optional base branch (default 'main'). */
   baseBranch?: string;
+  /**
+   * Optional batch identifier — when set, the dispatched agent is tracked
+   * under that batch and a synthetic `batch_completed` event fires once
+   * every agent in the batch has emitted `agent_finished`. See § batch-tracking
+   * marker below for the implementation.
+   */
+  batchId?: string;
 }
 
 export type DispatchAck =
@@ -277,6 +284,15 @@ export async function dispatchAgentCore(
     return { ok: false, error: 'missing targetRepo' };
   }
 
+  // § batch-tracking hookup — see marker at EOF. When req.batchId is set
+  // we wrap the emit callback so agent_finished triggers a batch sweep
+  // that synthesizes `batch_completed` when the last agent in the batch
+  // finishes. No-op if req.batchId is undefined.
+  registerAgentInBatch(req.batchId, req.agentId);
+  const innerEmit = onEvent;
+  onEvent = (ev) =>
+    wrapEmitForBatch(req.batchId, req.agentId, innerEmit, ev);
+
   let acquired = false;
   let handle: WorktreeHandle | null = null;
   try {
@@ -421,4 +437,210 @@ export async function abortAllAgentsCore(): Promise<void> {
     dones.push(rec.done);
   }
   await Promise.all(dones);
+}
+
+// ─── § batch-tracking ──────────────────────────────────────────────────
+//
+// Phase 6.5 fan-in support. When `dispatchAgentCore` is called with a
+// `batchId`, the agent is registered under that batch via
+// `registerAgentInBatch(...)`. The emit callback is wrapped by
+// `wrapEmitForBatch(...)` so when each agent's synthetic
+// `agent_finished` event flows through, we sweep the batch — once every
+// agent in the batch is marked finished, a synthetic `batch_completed`
+// event is emitted via the same `onEvent` callback with payload
+// `{ batchId, worktrees: [{ agentId, path, branch }] }`. The planner's
+// worktree-merger module consumes that envelope to fan-in merge.
+//
+// Each agent's worktree handle is captured at dispatch time (before the
+// async streaming loop calls `record.handle.cleanup()` in its finally
+// block — that cleanup tears down the worktree directory). The synthetic
+// `batch_completed` payload therefore carries the worktree's absolute
+// path + branch name at the moment of dispatch, even though the
+// directory may already be in the process of being removed when the
+// final agent's `agent_finished` fires. Callers (planner / worktree-
+// merger) are responsible for capturing HEAD shas inline before the
+// pool's cleanup races to remove the worktree. For now this matches
+// the dogfood pattern of synchronously execFileSync'ing `git rev-parse`
+// inside the `agent_finished` handler.
+
+interface BatchAgentEntry {
+  agentId: AgentId;
+  worktreePath: string | null;
+  branch: string | null;
+  finished: boolean;
+}
+
+interface BatchRecord {
+  batchId: string;
+  agents: Map<AgentId, BatchAgentEntry>;
+  emitted: boolean;
+}
+
+const batches = new Map<string, BatchRecord>();
+
+function registerAgentInBatch(
+  batchId: string | undefined,
+  agentId: AgentId,
+): void {
+  if (!batchId) return;
+  let batch = batches.get(batchId);
+  if (!batch) {
+    batch = { batchId, agents: new Map(), emitted: false };
+    batches.set(batchId, batch);
+  }
+  if (!batch.agents.has(agentId)) {
+    batch.agents.set(agentId, {
+      agentId,
+      worktreePath: null,
+      branch: null,
+      finished: false,
+    });
+  }
+}
+
+function recordBatchWorktree(
+  batchId: string | undefined,
+  agentId: AgentId,
+  worktree: string | undefined,
+  branch: string | undefined,
+): void {
+  if (!batchId) return;
+  const batch = batches.get(batchId);
+  if (!batch) return;
+  const entry = batch.agents.get(agentId);
+  if (!entry) return;
+  if (typeof worktree === 'string') entry.worktreePath = worktree;
+  if (typeof branch === 'string') entry.branch = branch;
+}
+
+function maybeEmitBatchCompleted(
+  batchId: string | undefined,
+  onEvent: EmitFn,
+): void {
+  if (!batchId) return;
+  const batch = batches.get(batchId);
+  if (!batch || batch.emitted) return;
+  const allFinished = Array.from(batch.agents.values()).every(
+    (a) => a.finished,
+  );
+  if (!allFinished) return;
+  batch.emitted = true;
+  const worktrees = Array.from(batch.agents.values()).map((a) => ({
+    agentId: a.agentId,
+    path: a.worktreePath,
+    branch: a.branch,
+  }));
+  // Use the first agent in the batch as `agent_id` since CodexEvent is
+  // typed per-agent. Downstream batch consumers identify by `batchId` in
+  // the payload, not by `agent_id`.
+  const firstAgentId = batch.agents.keys().next().value as AgentId;
+  try {
+    onEvent({
+      agent_id: firstAgentId,
+      type: 'batch_completed',
+      payload: {
+        batchId,
+        worktrees,
+      },
+      at: Date.now(),
+    });
+  } catch (err) {
+    console.warn('[codex-pool-core] batch_completed emit failed', err);
+  }
+  // Don't delete the batch record — keep it for diagnostics. A future
+  // helper can reset() it. Memory cost is trivial (handful of entries).
+}
+
+/**
+ * Emit wrapper invoked by `dispatchAgentCore` for every event the
+ * streaming loop produces. Always forwards the event to the inner emit
+ * callback first, then performs the batch-tracking side effects.
+ */
+function wrapEmitForBatch(
+  batchId: string | undefined,
+  agentId: AgentId,
+  innerEmit: EmitFn,
+  ev: CodexEvent,
+): void {
+  // Forward first — never let batch bookkeeping prevent the renderer
+  // from seeing the underlying event.
+  try {
+    innerEmit(ev);
+  } catch (err) {
+    console.warn('[codex-pool-core] innerEmit threw', err);
+  }
+  if (!batchId) return;
+  try {
+    if (ev.type === 'agent_started') {
+      const payload = ev.payload as {
+        worktree?: unknown;
+        branch?: unknown;
+      };
+      recordBatchWorktree(
+        batchId,
+        agentId,
+        typeof payload?.worktree === 'string'
+          ? payload.worktree
+          : undefined,
+        typeof payload?.branch === 'string' ? payload.branch : undefined,
+      );
+      return;
+    }
+    if (ev.type === 'agent_finished') {
+      const batch = batches.get(batchId);
+      const entry = batch?.agents.get(agentId);
+      if (entry) entry.finished = true;
+      maybeEmitBatchCompleted(batchId, innerEmit);
+    }
+  } catch (err) {
+    console.warn('[codex-pool-core] batch tracking error', err);
+  }
+}
+
+/**
+ * Test-only / lifecycle reset. Drops every batch record. Called by the
+ * Electron wrapper's shutdown path (future) and by unit tests that need
+ * a clean slate between cases.
+ */
+export function _resetBatchTrackingForTests(): void {
+  batches.clear();
+}
+
+/**
+ * Test-only helper: drive the batch-tracking state machine without
+ * spawning Codex. Exposes the private registration + wrap functions so
+ * a unit test can verify the synthetic `batch_completed` envelope
+ * shape without booting the SDK.
+ */
+export const _batchTrackingTestHooks = {
+  register: registerAgentInBatch,
+  emit: wrapEmitForBatch,
+};
+
+/**
+ * Diagnostic: inspect a batch record (e.g. for tests or future tooling).
+ * Returns `null` if no batch with that id is registered.
+ */
+export function getBatchSnapshot(batchId: string): {
+  batchId: string;
+  agents: Array<{
+    agentId: AgentId;
+    worktreePath: string | null;
+    branch: string | null;
+    finished: boolean;
+  }>;
+  emitted: boolean;
+} | null {
+  const batch = batches.get(batchId);
+  if (!batch) return null;
+  return {
+    batchId,
+    agents: Array.from(batch.agents.values()).map((a) => ({
+      agentId: a.agentId,
+      worktreePath: a.worktreePath,
+      branch: a.branch,
+      finished: a.finished,
+    })),
+    emitted: batch.emitted,
+  };
 }
