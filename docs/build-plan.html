@@ -55,6 +55,7 @@ h2 .note { color: var(--text-3); font-weight: 400; text-transform: none; letter-
 .legend { display: flex; gap: 18px; align-items: center; margin: 0 0 12px; flex-wrap: wrap; font-size: 12px; color: var(--text-2); }
 .legend .item { display: inline-flex; align-items: center; gap: 6px; }
 .legend .swatch { width: 14px; height: 12px; border-radius: 3px; border: 1px solid var(--border-strong); }
+.legend .swatch.role-ORCH { background: rgba(242,107,92,0.4); }
 .legend .swatch.role-MAIN { background: rgba(110,148,232,0.4); }
 .legend .swatch.role-VOICE { background: rgba(74,158,156,0.4); }
 .legend .swatch.role-STATE { background: rgba(88,214,141,0.4); }
@@ -84,6 +85,7 @@ h2 .note { color: var(--text-3); font-weight: 400; text-transform: none; letter-
 .worker-label .name { font-size: 13px; color: var(--text); font-weight: 500; margin-top: 4px; }
 .worker-label .domain { font-size: 11px; color: var(--text-2); margin-top: 2px; }
 
+.worker-label .role-ORCH { background: rgba(242,107,92,0.18); color: var(--crit); }
 .worker-label .role-MAIN { background: rgba(110,148,232,0.18); color: var(--blue); }
 .worker-label .role-VOICE { background: rgba(74,158,156,0.22); color: var(--teal); }
 .worker-label .role-STATE { background: rgba(88,214,141,0.18); color: var(--green); }
@@ -112,6 +114,7 @@ h2 .note { color: var(--text-3); font-weight: 400; text-transform: none; letter-
 .bar.crit { box-shadow: inset 0 0 0 2px rgba(242,107,92,0.7); }
 .bar .phase-tag { font-family: "JetBrains Mono", monospace; font-size: 9px; opacity: 0.6; margin-right: 5px; }
 
+.bar.role-ORCH { background: rgba(242,107,92,0.16); border-color: rgba(242,107,92,0.55); }
 .bar.role-MAIN { background: rgba(110,148,232,0.18); border-color: rgba(110,148,232,0.5); }
 .bar.role-VOICE { background: rgba(74,158,156,0.22); border-color: rgba(74,158,156,0.55); }
 .bar.role-STATE { background: rgba(88,214,141,0.18); border-color: rgba(88,214,141,0.5); }
@@ -201,12 +204,12 @@ footer { margin-top: 32px; text-align: center; color: var(--text-3); font-size: 
 </div>
 
 <div class="legend">
-  <div class="item"><span class="swatch role-MAIN"></span> MAIN</div>
-  <div class="item"><span class="swatch role-VOICE"></span> VOICE</div>
-  <div class="item"><span class="swatch role-STATE"></span> STATE</div>
-  <div class="item"><span class="swatch role-UI"></span> UI</div>
-  <div class="item"><span class="swatch role-CANVAS"></span> CANVAS</div>
-  <div class="item"><span class="swatch role-MIXTAPE"></span> MIXTAPE</div>
+  <div class="item"><span class="swatch role-ORCH"></span> Main (me — orchestrator)</div>
+  <div class="item"><span class="swatch role-MAIN"></span> Worker 1 (main process)</div>
+  <div class="item"><span class="swatch role-VOICE"></span> Worker 2 (voice)</div>
+  <div class="item"><span class="swatch role-STATE"></span> Worker 3 (state)</div>
+  <div class="item"><span class="swatch role-UI"></span> Worker 4 (UI)</div>
+  <div class="item"><span class="swatch role-CANVAS"></span> Worker 5 (canvas)</div>
   <div class="item"><span class="swatch crit-border"></span> critical path</div>
   <div class="item"><span class="swatch done-tint"></span> already done</div>
 </div>
@@ -247,58 +250,62 @@ footer { margin-top: 32px; text-align: center; color: var(--text-3); font-size: 
 <script>
 const UNITS = 12; // 12-hour budget
 
-// Workers (rows). Each task has phase, name, t0, t1, status, body, optional crit.
+// Workers (rows). Main = me (orchestrator). W1-W5 = parallel agents I dispatch.
 const workers = [
   {
-    role: "MAIN", name: "Main process", domain: "Electron main · bridge · tool router · windows · Codex spawner",
+    role: "ORCH", name: "Main", domain: "Orchestrator (me) · review gates · cross-cutting integration · contract maintenance",
+    tasks: [
+      { id: "main.r1", phase: "R1", name: "Review P1 lanes — verify integration sound", t0: 2, t1: 2.5, status: "pending", crit: true, body: "Verify bridge fix + tool routing + escalation work together. Smoke-test full voice loop. Resolve any contract drift before P2 fires." },
+      { id: "main.r2", phase: "R2", name: "Review P2 — strip restoration", t0: 4.5, t1: 5, status: "pending", crit: true, body: "Pencil parity check across all 6 strip states. Resolve any cross-worker integration issues before P3+P4 batch fires." },
+      { id: "main.p3-cc", phase: "P3", name: "Cross-cutting: wire planner ↔ Realtime ↔ side-store", t0: 6, t1: 7.5, status: "pending", body: "Integration glue between W1's planner service, W2's consult_director tool, and W3's side store. Likely too cross-cutting for any single worker." },
+      { id: "main.r3", phase: "R3", name: "Review P3+P4 — 3-tier alive", t0: 7.5, t1: 8, status: "pending", crit: true, body: "Verify consult_director narrates planner reasoning. Real Codex pops in Hive. End-to-end Mixtape build via real agents." },
+      { id: "main.r4", phase: "R4", name: "Review P5+P6 — ship-ready", t0: 10, t1: 10.5, status: "pending", crit: true, body: "Final dry run of full 5-min demo. Captions, audio, session rotation all working." },
+    ]
+  },
+  {
+    role: "MAIN", name: "Worker 1", domain: "Electron main process · bridge · tool router · windows · Codex spawner",
     tasks: [
       { id: "p1.a", phase: "P1", name: "Bridge diagnose + fix", t0: 0, t1: 1, status: "next", crit: true, body: "Verify preload load, fix sandbox/.cjs, confirm window.director in devtools." },
       { id: "p2.a", phase: "P2", name: "Restore overlay window flags", t0: 2.5, t1: 3, status: "pending", body: "transparent · vibrancy · frame:false · closable:false · type:'panel'" },
       { id: "p2.b", phase: "P2", name: "Chat-debug 2nd BrowserWindow", t0: 3, t1: 4, status: "pending", body: "Tray menu → second normal window for debug. Same store." },
-      { id: "p3.a", phase: "P3", name: "Planner service (Responses API + gpt-5)", t0: 4.5, t1: 6.5, status: "pending", body: "Main-process planner. reasoning.effort: high. Stateless with side-store re-injection." },
-      { id: "p4.a", phase: "P4", name: "Codex SDK + 4-process pool", t0: 4.5, t1: 6, status: "pending", body: "Install @openai/codex-sdk · spawn manager · JSONL parser." },
+      { id: "p3.a", phase: "P3", name: "Planner service (Responses API + gpt-5)", t0: 5, t1: 6.5, status: "pending", body: "Main-process planner. reasoning.effort: high. Stateless with side-store re-injection." },
+      { id: "p4.a", phase: "P4", name: "Codex SDK + 4-process pool", t0: 5, t1: 6, status: "pending", body: "Install @openai/codex-sdk · spawn manager · JSONL parser. Sequential after planner — same worker." },
       { id: "p4.b", phase: "P4", name: "Worktree + AGENTS.md per agent", t0: 6, t1: 7.5, status: "pending", body: "git worktree per Codex spawn · AGENTS.md as system prompt." },
     ]
   },
   {
-    role: "VOICE", name: "Realtime voice", domain: "WebRTC client · session · tool delivery · escalation injection",
+    role: "VOICE", name: "Worker 2", domain: "Realtime voice · WebRTC client · session · tool delivery · escalation",
     tasks: [
-      { id: "p1.c", phase: "P1", name: "Escalation → Realtime injection", t0: 0.75, t1: 1.5, status: "next", crit: true, body: "director:escalation event → conversation.item.create + response.create. Needs bridge fix first." },
-      { id: "p3.b", phase: "P3", name: "consult_director tool + bridge", t0: 4.5, t1: 6.5, status: "pending", body: "Tool def in session.update · routes to planner · reasoning summary → audio narration." },
+      { id: "p1.c", phase: "P1", name: "Escalation → Realtime injection", t0: 1, t1: 2, status: "next", crit: true, body: "director:escalation event → conversation.item.create + response.create. Starts AFTER W1's bridge fix lands." },
+      { id: "p3.b", phase: "P3", name: "consult_director tool + bridge", t0: 5, t1: 6.5, status: "pending", body: "Tool def in session.update · routes to planner · reasoning summary → audio narration." },
       { id: "p6.a", phase: "P6", name: "55-min session rotation", t0: 8, t1: 9, status: "pending", body: "Mint Session_B · World State Brief inject · swap < 200ms." },
       { id: "p6.b", phase: "P6", name: "Disconnect / reconnect UX", t0: 9, t1: 9.5, status: "pending", body: "Grey Strip · macOS notif · queue last utterance for replay." },
     ]
   },
   {
-    role: "STATE", name: "State + IPC + Sim", domain: "Zustand · IPC contracts · agent simulator · audio cues",
+    role: "STATE", name: "Worker 3", domain: "State machine · IPC contracts · agent simulator · side store · audio cues",
     tasks: [
       { id: "p1.b", phase: "P1", name: "Tool routing smoke test", t0: 0.5, t1: 2, status: "next", crit: true, body: "Show Moodboard / Show Artifact buttons → tool.call → tool-router → Canvas. Verify path end-to-end." },
-      { id: "p3.c", phase: "P3", name: "Side store (harness · decisions · transcript)", t0: 4.5, t1: 6, status: "pending", body: "Atomic writes (tmp + rename) · debounced agent snapshots." },
+      { id: "p3.c", phase: "P3", name: "Side store (harness · decisions · transcript)", t0: 5, t1: 6, status: "pending", body: "Atomic writes (tmp + rename) · debounced agent snapshots. NEW FILE — no overlap with W1." },
       { id: "p4.c", phase: "P4", name: "Codex events → store actions", t0: 6, t1: 7.5, status: "pending", body: "file_change · turn.completed · error → addAgent/updateAgent/blockAgent/completeAgent." },
-      { id: "p5.b", phase: "P5", name: "Audio cue synthesis", t0: 8, t1: 8.5, status: "pending", body: "Web Audio: confirm · tick · escalation · done · halo." },
+      { id: "p5.b", phase: "P5", name: "Audio cue synthesis", t0: 8, t1: 8.5, status: "pending", body: "Web Audio: confirm · tick · escalation · done · halo. NEW DIR src/renderer/src/audio/*." },
     ]
   },
   {
-    role: "UI", name: "Strip + Chat UI", domain: "Strip states · AgentRow · captions · onboarding",
+    role: "UI", name: "Worker 4", domain: "Strip components · App.tsx render · chat UI · captions · onboarding",
     tasks: [
       { id: "p2.a2", phase: "P2", name: "App.tsx revert to strip render", t0: 2.5, t1: 3.5, status: "pending", crit: true, body: "Conditional render dormant/listening/speaking/thinking/hive. Keep state wiring from W2." },
       { id: "p2.a3", phase: "P2", name: "Auto-resize per state", t0: 3.5, t1: 4, status: "pending", body: "strip.resize IPC drives setBounds. 12→38→280." },
       { id: "p2.c", phase: "P2", name: "Visual QA vs Pencil", t0: 4, t1: 4.5, status: "pending", body: "Screenshot every state, compare to Pencil frames." },
-      { id: "p5.a", phase: "P5", name: "Captions track", t0: 8, t1: 8.75, status: "pending", body: "Fading subtitle text below dormant strip mirroring Realtime narration." },
-      { id: "p5.c", phase: "P5", name: "Polish (canvas-handle · hover-peek · onboarding)", t0: 8.75, t1: 10, status: "pending", body: "Strip-as-Canvas-handle · hover-to-peek · 3A-1 minimal-seed welcome." },
+      { id: "p5.a", phase: "P5", name: "Captions component (NEW file)", t0: 8.5, t1: 9.25, status: "pending", body: "components/Captions.tsx — fading subtitle below strip. Avoids App.tsx conflict by being its own component mounted from App.tsx." },
+      { id: "p5.c", phase: "P5", name: "Polish (canvas-handle · hover-peek · onboarding)", t0: 9.25, t1: 10, status: "pending", body: "Strip-as-Canvas-handle · hover-to-peek · 3A-1 minimal-seed welcome." },
     ]
   },
   {
-    role: "CANVAS", name: "Canvas + GenUI", domain: "Canvas window · React components · iframe punchline",
+    role: "CANVAS", name: "Worker 5", domain: "Canvas BrowserWindow · GenUI React components · iframe punchline",
     tasks: [
-      { id: "p2.c2", phase: "P2", name: "Canvas visual QA", t0: 4, t1: 4.5, status: "pending", body: "Verify Canvas slides correctly with new strip positioning." },
-      { id: "p4.d", phase: "P4", name: "Dogfood: real Codex builds Mixtape TODOs", t0: 7, t1: 8, status: "pending", body: "Verify iframe punchline shows live Mixtape with completed flippable card." },
-    ]
-  },
-  {
-    role: "MIXTAPE", name: "Mixtape demo target", domain: "Reference app at :3001 · iframe target",
-    tasks: [
-      { id: "p0.x", phase: "P0", name: "Cassette aesthetic + PlaylistCard flip", t0: 0, t1: 2, status: "done", body: "Already shipped. localhost:3001/?vibe=… works with the gorgeous cassette card and flip." },
+      { id: "p2.c2", phase: "P2", name: "Canvas visual QA", t0: 4, t1: 4.5, status: "pending", body: "Verify Canvas slides correctly with new strip positioning. Read-only — no code conflict with Worker 1's window changes." },
+      { id: "p4.d", phase: "P4", name: "Dogfood: real Codex builds Mixtape TODOs", t0: 7, t1: 8, status: "pending", body: "Verify iframe punchline shows live Mixtape with completed flippable card after real Codex run." },
     ]
   },
 ];
