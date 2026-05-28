@@ -27,6 +27,7 @@ import {
   type ChildProcess,
 } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { createServer } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -137,15 +138,20 @@ const ctx: CleanupCtx = {
 };
 
 async function cleanup(): Promise<void> {
-  if (ctx.serverProc && !ctx.serverProc.killed) {
-    log('cleanup: stopping next server');
-    ctx.serverProc.kill('SIGTERM');
+  if (ctx.serverProc && !ctx.serverProc.killed && ctx.serverProc.pid) {
+    log('cleanup: stopping next server (process group)');
+    // next start (via pnpm) forks a next-server worker; killing only the
+    // direct child orphans the worker holding the port. Spawn with
+    // detached:true puts the children in their own process group so the
+    // negative-pid trick reaches the whole tree.
+    const pgid = -ctx.serverProc.pid;
+    try {
+      process.kill(pgid, 'SIGTERM');
+    } catch {}
     await new Promise((r) => setTimeout(r, 500));
-    if (!ctx.serverProc.killed) {
-      try {
-        ctx.serverProc.kill('SIGKILL');
-      } catch {}
-    }
+    try {
+      process.kill(pgid, 'SIGKILL');
+    } catch {}
   }
   for (const id of ctx.liveAgentIds) {
     try {
@@ -527,33 +533,54 @@ async function mixtapeBuildAndStart(): Promise<{ port: number }> {
   );
   log('mixtape: build OK');
 
-  log('mixtape: starting next server (background)');
-  const proc = spawn('pnpm', ['--filter', 'mixtape', 'start'], {
-    cwd: REPO_ROOT,
-    env: { ...process.env },
+  // Pick a free ephemeral port up-front. mixtape's start script hardcodes
+  // -p 3001, which collides with any leftover dev server / orphaned next-
+  // server worker. Asking the OS for a free port and overriding via `next
+  // start -p <port>` makes the dogfood resilient to whatever's listening.
+  const port = await new Promise<number>((resolveP, rejectP) => {
+    const probe = createServer();
+    probe.once('error', rejectP);
+    probe.listen(0, '127.0.0.1', () => {
+      const addr = probe.address();
+      probe.close();
+      if (addr && typeof addr === 'object') resolveP(addr.port);
+      else rejectP(new Error('failed to allocate ephemeral port'));
+    });
   });
+
+  log(`mixtape: starting next server on :${port} (background, detached)`);
+  const proc = spawn(
+    'pnpm',
+    ['--filter', 'mixtape', 'exec', 'next', 'start', '-p', String(port)],
+    {
+      cwd: REPO_ROOT,
+      env: { ...process.env },
+      detached: true,
+    },
+  );
   ctx.serverProc = proc;
 
-  const port = await new Promise<number>((resolveP, rejectP) => {
+  await new Promise<void>((resolveP, rejectP) => {
     const deadline = setTimeout(() => {
       rejectP(new Error('next server did not become ready within 30s'));
     }, 30_000);
     let buf = '';
     const onData = (chunk: Buffer): void => {
       buf += chunk.toString();
-      const m = buf.match(/Local:\s+https?:\/\/[^:]+:(\d+)/);
-      if (m) {
+      // Match the port we requested explicitly — don't trust regex capture
+      // to give us the right number if next prints multiple addresses.
+      if (buf.includes(`:${port}`) && /Local:|Ready in/.test(buf)) {
         clearTimeout(deadline);
         proc.stdout.off('data', onData);
         proc.stderr.off('data', onData);
-        resolveP(parseInt(m[1], 10));
+        resolveP();
       }
     };
     proc.stdout.on('data', onData);
     proc.stderr.on('data', onData);
     proc.on('exit', (code) => {
       clearTimeout(deadline);
-      rejectP(new Error(`next server exited early with code ${code}`));
+      rejectP(new Error(`next server exited early with code ${code} — stdout/stderr buffer: ${buf.slice(-500)}`));
     });
   });
 
