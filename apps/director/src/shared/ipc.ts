@@ -102,6 +102,17 @@ export const IpcChannel = {
   CodexEvent: 'codex.event',                          // Worker 1 — P4
   CodexDispatch: 'codex.dispatch',                    // Worker 1 — P4
   CodexAbort: 'codex.abort',                          // Worker 1 — P4
+  // ─── § canvas-degradation (W5 — P6.6) ─────────────────────────────────
+  // ApiKeyMissing canvas card writes the user-provided OPENAI_API_KEY back
+  // to disk via the main process. Keychain mode is gated by the env flag
+  // `DIRECTOR_USE_KEYCHAIN=1` and NOT implemented in this lane — main
+  // currently always writes to the project `.env` file (atomic semantics).
+  AppWriteEnv: 'app.writeEnv',                        // Worker 5 — P6.6
+  // ─── § realtime-rotation + reconnect (W2 — P6.1 + P6.2) ───────────────
+  /** Renderer → main: lifecycle FSM hit T+55, build Brief + mint Session_B. */
+  RealtimeRotationRequest: 'realtime.rotationRequest', // Worker 2 — P6.1
+  /** Renderer → main: reconnect-loop state change (degraded / retrying / live). */
+  RealtimeReconnectState: 'realtime.reconnectState',   // Worker 2 — P6.2
 } as const;
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel];
@@ -143,6 +154,44 @@ export interface RotationReadyPayload {
 export interface RealtimeDisconnectPayload {
   reason: 'user-quit' | 'rotation-complete' | 'auth-failed' | 'network';
   sessionId: string;
+}
+
+// ─── § realtime-rotation + reconnect payloads (W2 — P6.1 + P6.2) ─────────
+
+export interface RealtimeRotationRequestPayload {
+  /** Renderer-side correlation id so the response can be matched. */
+  requestId: string;
+  /** Identifier the renderer uses to refer to Session_A in its logs. */
+  fromSessionId?: string | null;
+  /** Optional voice override (rotation usually keeps the same voice). */
+  voice?: 'marin' | 'cedar';
+}
+
+export type RealtimeRotationResponse =
+  | {
+      ok: true;
+      requestId: string;
+      newToken: string;
+      newSessionId: string;
+      expiresAt: number;
+      brief: WorldStateBrief;
+    }
+  | { ok: false; requestId: string; error: string };
+
+/**
+ * Renderer → main fire-and-forget event reporting the reconnect FSM state.
+ * Main observes this to surface tray badge / macOS notifications. The
+ * renderer-side store is the source of truth for visual UI; this channel
+ * is for cross-window / cross-process effects.
+ */
+export interface RealtimeReconnectStatePayload {
+  state: 'live' | 'degraded' | 'retrying' | 'offline-persistent';
+  /** 0 = no attempts yet; increments after each failed retry. */
+  attempt: number;
+  /** Last error message, if any. */
+  lastError?: string;
+  /** ms since the disconnect started. */
+  outageMs: number;
 }
 
 // ─── tool.* payloads ─────────────────────────────────────────────────────
@@ -426,6 +475,18 @@ export interface DirectorBridge {
   codex: {
     onEvent: (cb: (event: CodexEvent) => void) => () => void;
   };
+  // ─── § realtime-rotation + reconnect (W2 — P6.1 + P6.2) ─────────────
+  /** Realtime rotation + reconnect bridge. Renderer drives the lifecycle
+   *  FSM; main provides the cross-process work (mint + read side store +
+   *  surface tray badge / notifications via the reconnect-state events). */
+  realtimeRotation: {
+    /** T+55 trigger: request Session_B + a fresh World State Brief. */
+    requestRotation: (
+      payload: RealtimeRotationRequestPayload,
+    ) => Promise<RealtimeRotationResponse>;
+    /** Report renderer-side reconnect FSM state to main (fire-and-forget). */
+    reportReconnectState: (payload: RealtimeReconnectStatePayload) => void;
+  };
 }
 
 declare global {
@@ -458,6 +519,8 @@ export interface IpcSendMap {
   [IpcChannel.AskAnswer]: AskAnswerPayload;
   // § codex-event-bridge (W3 — P4)
   [IpcChannel.CodexEvent]: CodexEvent;
+  // § realtime-rotation + reconnect (W2 — P6.1 + P6.2)
+  [IpcChannel.RealtimeReconnectState]: RealtimeReconnectStatePayload;
 }
 
 /** Invoke-style channels (request → ack). */
@@ -491,7 +554,39 @@ export interface IpcInvokeMap {
       | { ok: true; world: Record<string, unknown> }
       | { ok: false; error: string };
   };
+  // § canvas-degradation (W5 — P6.6)
+  [IpcChannel.AppWriteEnv]: {
+    request: AppWriteEnvRequest;
+    response: AppWriteEnvResponse;
+  };
+  // § realtime-rotation + reconnect (W2 — P6.1)
+  [IpcChannel.RealtimeRotationRequest]: {
+    request: RealtimeRotationRequestPayload;
+    response: RealtimeRotationResponse;
+  };
 }
+
+// ─── § canvas-degradation payloads (W5 — P6.6) ──────────────────────────
+// `AppWriteEnv` lets the Canvas window's ApiKeyMissing card persist a
+// user-provided OPENAI_API_KEY (or any whitelisted env key) to the project
+// `.env` file via the main process. Main is the only thing on macOS that
+// can touch the user's home directory, so this MUST be a main-process
+// handler. The handler validates that `key` is on the allow-list and writes
+// the value atomically via the same tmp+rename pattern used by side-store.
+
+/** Subset of env keys the handler will write. Keep narrow — every entry is
+ *  user-supplied input persisted to disk. */
+export type AppWriteEnvKey = 'OPENAI_API_KEY';
+
+export interface AppWriteEnvRequest {
+  key: AppWriteEnvKey;
+  value: string;
+}
+
+export type AppWriteEnvResponse =
+  | { ok: true; path: string }
+  | { ok: false; error: string };
+
 
 // ─── Re-export state types so callers only need this import ──────────────
 

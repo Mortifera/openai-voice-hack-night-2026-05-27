@@ -104,6 +104,14 @@ export function realtimeToolDefs(): Array<Record<string, unknown>> {
               'agent_pod',
               'diagram',
               'html',
+              // ─── § canvas-degradation (W5 — P6.6) ─────────────────────
+              // Error/degradation cards surfaced by the renderer's
+              // CanvasErrorBoundary + boot-time precondition checks
+              // (mic permission, missing API key, repeat rotation failures).
+              'mic_denied',
+              'api_key_missing',
+              'rotation_failed',
+              'canvas_error',
             ],
             description: 'Component kind. Closed enum — pick one of the listed.',
           },

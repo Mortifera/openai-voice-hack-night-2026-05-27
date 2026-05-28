@@ -9,6 +9,12 @@
 
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import { CanvasIpcChannel } from '../shared/canvas-ipc.js';
+// ─── § canvas-degradation (W5 — P6.6) ───────────────────────────────────
+import {
+  IpcChannel,
+  type AppWriteEnvRequest,
+  type AppWriteEnvResponse,
+} from '../shared/ipc.js';
 
 type Listener = (...args: unknown[]) => void;
 type IpcListener = (event: IpcRendererEvent, ...args: unknown[]) => void;
@@ -66,15 +72,37 @@ const api = {
   },
 };
 
+// ─── § canvas-degradation (W5 — P6.6) ───────────────────────────────────
+// Narrow `director.app.writeEnv` bridge for the ApiKeyMissing card. Single
+// IPC channel exposed via invoke — main owns the file write, the canvas
+// renderer never touches `fs` directly.
+const appApi = {
+  writeEnv(req: AppWriteEnvRequest): Promise<AppWriteEnvResponse> {
+    return ipcRenderer.invoke(IpcChannel.AppWriteEnv, req);
+  },
+};
+
 if (process.contextIsolated) {
   try {
     contextBridge.exposeInMainWorld('electron', { ipcRenderer: api });
-    contextBridge.exposeInMainWorld('director', { canvasIpc: api });
+    contextBridge.exposeInMainWorld('director', {
+      canvasIpc: api,
+      // § canvas-degradation (W5 — P6.6)
+      app: appApi,
+    });
   } catch (err) {
     console.error('[canvas:preload] failed to expose bridge', err);
   }
 } else {
-  (window as unknown as { electron: { ipcRenderer: typeof api } }).electron = {
-    ipcRenderer: api,
-  };
+  (
+    window as unknown as {
+      electron: { ipcRenderer: typeof api };
+      director: { canvasIpc: typeof api; app: typeof appApi };
+    }
+  ).electron = { ipcRenderer: api };
+  (
+    window as unknown as {
+      director: { canvasIpc: typeof api; app: typeof appApi };
+    }
+  ).director = { canvasIpc: api, app: appApi };
 }

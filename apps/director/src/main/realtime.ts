@@ -17,6 +17,12 @@ import {
   type RealtimeEphemeralToken,
   type RealtimeSessionRequest,
 } from '../shared/realtime.js';
+import type { WorldStateBrief } from '../shared/state.js';
+import { readWorldState } from './side-store.js';
+import {
+  buildWorldStateBrief,
+  type BriefSourceSnapshot,
+} from './world-state-brief.js';
 
 const CLIENT_SECRETS_URL = 'https://api.openai.com/v1/realtime/client_secrets';
 
@@ -111,3 +117,68 @@ export async function mintEphemeralToken(
 
   return { value, expiresAt, model };
 }
+
+// ─── § rotation-coordinator (W2 — P6.1) ──────────────────────────────────
+//
+// Session rotation @ T+55:00. The lifecycle FSM in the renderer asks main
+// to mint Session_B + build a World State Brief from the side store; the
+// renderer then opens a 2nd RTCPeerConnection, swaps audio/mic at the next
+// VAD-silent window, and tears down Session_A. See docs/architecture.md §4
+// + docs/remaining-phases.md §6.1.
+//
+// This block is append-only per docs/contracts.md § 13.1.
+
+const REALTIME_SESSION_STARTED_AT = Date.now();
+
+/**
+ * Result of a rotation prep call. Carries the freshly-minted Session_B
+ * token + the Brief that should be injected as a `system`-role
+ * `conversation.item.create` before audio swap.
+ */
+export interface PrepareRotationResult {
+  token: RealtimeEphemeralToken;
+  brief: WorldStateBrief;
+  /** Wall-clock when the brief was materialized. */
+  briefAt: number;
+}
+
+/**
+ * Mint Session_B + materialize the World State Brief from disk. Pure
+ * orchestration — does NOT touch the renderer; the caller emits
+ * `IpcChannel.RealtimeRotationReady` once this resolves.
+ *
+ * Failure modes:
+ *  - mintEphemeralToken throws on bad API key / network → propagated.
+ *  - readWorldState() returns a partial snapshot on disk errors → the
+ *    brief builder tolerates missing fields (verified by unit tests).
+ */
+export async function prepareRotation(
+  req: RealtimeSessionRequest = {},
+): Promise<PrepareRotationResult> {
+  // Mint first — if it fails we never want a stale brief floating around.
+  const token = await mintEphemeralToken(req);
+
+  let snapshot: BriefSourceSnapshot = {};
+  try {
+    snapshot = (await readWorldState()) as unknown as BriefSourceSnapshot;
+  } catch (err) {
+    console.warn('[realtime] readWorldState failed during rotation; building empty brief', err);
+  }
+
+  const now = Date.now();
+  const brief = buildWorldStateBrief(snapshot, {
+    sessionStartedAt: REALTIME_SESSION_STARTED_AT,
+    now,
+    transcriptLimit: 6,
+  });
+
+  return { token, brief, briefAt: now };
+}
+
+/**
+ * Re-exported brief builder + types so callers (including the IPC handler
+ * in `main/index.ts` if it wants to bypass `prepareRotation`) don't have
+ * to import from two locations.
+ */
+export { buildWorldStateBrief } from './world-state-brief.js';
+export type { BriefSourceSnapshot } from './world-state-brief.js';

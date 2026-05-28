@@ -9,11 +9,14 @@ import {
   type ToolCallRequest,
   type ToolCallResponse,
   type MicStatusPayload,
+  type RealtimeReconnectStatePayload,
+  type RealtimeRotationRequestPayload,
+  type RealtimeRotationResponse,
   type StripResizeRequest,
   type StripResizeResponse,
 } from '../shared/ipc.js';
 import type { RealtimeEphemeralToken, RealtimeSessionRequest } from '../shared/realtime.js';
-import { mintEphemeralToken } from './realtime.js';
+import { mintEphemeralToken, prepareRotation } from './realtime.js';
 import { randomUUID } from 'node:crypto';
 import {
   createCanvasWindow,
@@ -27,6 +30,12 @@ import { registerToolRouterIpc } from './tool-router.js';
 import { showChatDebugWindow } from './chat-debug-window.js';
 import { registerPlannerDevIpc } from './planner.js';
 import { registerCodexPoolIpc, abortAllAgents } from './codex-pool.js';
+// ─── § canvas-degradation (W5 — P6.6) ───────────────────────────────────
+import { writeEnvKey } from './env-writer.js';
+import type {
+  AppWriteEnvRequest,
+  AppWriteEnvResponse,
+} from '../shared/ipc.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
@@ -343,6 +352,84 @@ function registerIpcHandlers(): void {
       const currentY = stripWindow.getBounds().y;
       stripWindow.setBounds({ x, y: currentY, width, height }, true);
       return { ok: true };
+    },
+  );
+
+  // ─── § realtime-rotation + reconnect (W2 — P6.1 + P6.2) ──────────────
+  // The lifecycle FSM in the renderer requests rotation @ T+55. Main
+  // mints Session_B + materializes a World State Brief from the side
+  // store; the renderer opens a 2nd peer, injects the Brief, and swaps
+  // audio at the next VAD-silent window. See remaining-phases.md §6.1.
+  ipcMain.handle(
+    IpcChannel.RealtimeRotationRequest,
+    async (
+      _evt,
+      payload: RealtimeRotationRequestPayload,
+    ): Promise<RealtimeRotationResponse> => {
+      const requestId = payload?.requestId ?? 'rot-unknown';
+      try {
+        const { token, brief } = await prepareRotation({ voice: payload?.voice });
+        // session_id is opaque on the OpenAI mint response — the renderer
+        // assigns its own correlation id once the new peer is up. We pass
+        // the request id back so caller can match the response.
+        return {
+          ok: true,
+          requestId,
+          newToken: token.value,
+          newSessionId: requestId,
+          expiresAt: token.expiresAt,
+          brief,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn('[director] rotation request failed', message);
+        return { ok: false, requestId, error: message };
+      }
+    },
+  );
+
+  // Renderer reports degraded → retrying → live transitions for tray /
+  // notifications. Fire-and-forget — never block the renderer.
+  ipcMain.on(
+    IpcChannel.RealtimeReconnectState,
+    (_evt, payload: RealtimeReconnectStatePayload) => {
+      if (!payload || typeof payload !== 'object') {
+        console.warn('[director] reconnect state event with bad payload', payload);
+        return;
+      }
+      console.log(
+        `[director] reconnect state=${payload.state} attempt=${payload.attempt} outageMs=${payload.outageMs}`,
+      );
+      // Future: tray icon red dot, macOS notification at 30s.
+    },
+  );
+
+  // ─── § canvas-degradation (W5 — P6.6) ────────────────────────────────
+  // ApiKeyMissing canvas card → main process: persist the user-typed
+  // OPENAI_API_KEY to the repo-root .env via atomic tmp+rename. The
+  // handler is allow-listed at the env-writer layer; payload validation
+  // tolerates wrong types with `console.warn` + a `{ ok: false }` reply.
+  ipcMain.handle(
+    IpcChannel.AppWriteEnv,
+    async (
+      _evt,
+      payload: AppWriteEnvRequest,
+    ): Promise<AppWriteEnvResponse> => {
+      try {
+        const result = await writeEnvKey(payload);
+        if (!result.ok) {
+          console.warn(`[director] app.writeEnv rejected: ${result.error}`);
+        } else {
+          console.log(
+            `[director] app.writeEnv wrote key=${payload?.key ?? 'unknown'} to ${result.path}`,
+          );
+        }
+        return result;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn('[director] app.writeEnv threw', message);
+        return { ok: false, error: message };
+      }
     },
   );
 }

@@ -18,6 +18,9 @@ import {
   type StatePatchPayload,
   type StripResizeRequest,
   type StripResizeResponse,
+  type RealtimeReconnectStatePayload,
+  type RealtimeRotationRequestPayload,
+  type RealtimeRotationResponse,
 } from '../shared/ipc.js';
 import type { CodexEvent } from '../shared/codex.js';
 import type {
@@ -95,6 +98,22 @@ const api: DirectorBridge = {
       const listener = (_evt: unknown, event: CodexEvent): void => cb(event);
       ipcRenderer.on(IpcChannel.CodexEvent, listener);
       return () => ipcRenderer.removeListener(IpcChannel.CodexEvent, listener);
+    },
+  },
+  // ─── § realtime-rotation + reconnect (W2 — P6.1 + P6.2) ────────────────
+  realtimeRotation: {
+    requestRotation(
+      payload: RealtimeRotationRequestPayload,
+    ): Promise<RealtimeRotationResponse> {
+      return ipcRenderer.invoke(IpcChannel.RealtimeRotationRequest, payload);
+    },
+    reportReconnectState(payload: RealtimeReconnectStatePayload): void {
+      try {
+        ipcRenderer.send(IpcChannel.RealtimeReconnectState, payload);
+      } catch (err) {
+        // Best-effort: never let a degraded-state report crash the client.
+        console.warn('[preload] realtimeRotation.reportReconnectState failed', err);
+      }
     },
   },
 };

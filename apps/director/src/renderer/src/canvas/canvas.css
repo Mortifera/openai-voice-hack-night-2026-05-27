@@ -475,3 +475,98 @@
   color: var(--text-primary);
   line-height: 1.35;
 }
+
+/* ─── § canvas-degradation (W5 — P6.6) ──────────────────────────────────
+   Shared visual language for MicDenied / ApiKeyMissing / RotationFailed /
+   CanvasError. Calm card geometry — same vocabulary as `rule-save` but
+   centered vertically with an actionable button row. */
+
+.canvas-degrade {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
+  height: 100%;
+  padding: 4px;
+}
+
+.canvas-degrade--soft {
+  color: var(--text-secondary);
+}
+
+.canvas-degrade--error .canvas-eyebrow {
+  color: var(--text-primary);
+}
+
+.canvas-degrade-body {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  max-width: 460px;
+}
+
+.canvas-degrade-button {
+  align-self: flex-start;
+  appearance: none;
+  border: 0.5px solid var(--border-subtle);
+  background: rgba(28, 28, 32, 0.78);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  padding: 8px 14px;
+  border-radius: 10px;
+  cursor: pointer;
+  text-decoration: none;
+  transition:
+    background 120ms ease,
+    transform 120ms ease;
+  -webkit-app-region: no-drag;
+}
+
+.canvas-degrade-button:hover:not(:disabled) {
+  background: rgba(40, 40, 46, 0.92);
+}
+
+.canvas-degrade-button:active:not(:disabled) {
+  transform: translateY(0.5px);
+}
+
+.canvas-degrade-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.canvas-degrade-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 4px;
+}
+
+.canvas-degrade-input {
+  flex: 1;
+  appearance: none;
+  border: 0.5px solid var(--border-subtle);
+  background: rgba(18, 18, 20, 0.72);
+  color: var(--text-primary);
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  outline: none;
+  -webkit-app-region: no-drag;
+}
+
+.canvas-degrade-input:focus {
+  border-color: var(--text-secondary);
+}
+
+.canvas-degrade-input:disabled {
+  opacity: 0.5;
+}
+
+.canvas-degrade-error {
+  color: var(--status-blocked, #e8645a);
+}
