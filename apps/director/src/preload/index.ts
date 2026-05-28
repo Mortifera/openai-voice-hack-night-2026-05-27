@@ -1,3 +1,8 @@
+console.log('[preload] script loaded', {
+  contextIsolated: process.contextIsolated,
+  sandboxed: process.sandboxed,
+});
+
 import { contextBridge, ipcRenderer } from 'electron';
 import {
   IpcChannel,
