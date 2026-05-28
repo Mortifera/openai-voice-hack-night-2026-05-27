@@ -212,7 +212,11 @@ export async function readRecentDecisions(limit = 20): Promise<Decision[]> {
 
 // ─── Agents (one file per agent, debounced writes) ──────────────────────
 
-const agentWriteTimers = new Map<AgentId, NodeJS.Timeout>();
+interface PendingAgentWrite {
+  timer: NodeJS.Timeout;
+  agent: Agent;
+}
+const agentWriteTimers = new Map<AgentId, PendingAgentWrite>();
 const AGENT_WRITE_DEBOUNCE_MS = 100;
 
 function agentPath(id: AgentId): string {
@@ -229,7 +233,7 @@ export async function writeAgent(agent: Agent): Promise<void> {
  */
 export function queueAgentWrite(agent: Agent): void {
   const existing = agentWriteTimers.get(agent.id);
-  if (existing) clearTimeout(existing);
+  if (existing) clearTimeout(existing.timer);
   // Snapshot the agent at enqueue time so later mutations don't get persisted.
   const frozen: Agent = { ...agent };
   const timer = setTimeout(() => {
@@ -238,17 +242,28 @@ export function queueAgentWrite(agent: Agent): void {
       console.error(`[side-store] agent ${frozen.id} write failed`, err),
     );
   }, AGENT_WRITE_DEBOUNCE_MS);
-  agentWriteTimers.set(agent.id, timer);
+  agentWriteTimers.set(agent.id, { timer, agent: frozen });
 }
 
 /**
  * Flush any pending debounced agent writes immediately. Call on app quit
  * so trailing state doesn't get lost to a 100ms timer that never fired.
+ *
+ * Fix: prior implementation cleared the timers WITHOUT firing the writes,
+ * silently losing in-flight state. Now we cancel timers + write each
+ * pending snapshot to disk synchronously (awaiting the parallel writes).
  */
 export async function flushAgentWrites(): Promise<void> {
   const pending = Array.from(agentWriteTimers.values());
-  pending.forEach(clearTimeout);
+  pending.forEach((p) => clearTimeout(p.timer));
   agentWriteTimers.clear();
+  await Promise.all(
+    pending.map((p) =>
+      writeAgent(p.agent).catch((err) =>
+        console.error(`[side-store] flush write failed for ${p.agent.id}`, err),
+      ),
+    ),
+  );
 }
 
 export async function readAgent(id: AgentId): Promise<Agent | null> {

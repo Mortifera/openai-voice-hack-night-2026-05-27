@@ -378,12 +378,22 @@ export class RealtimeClient {
 
   /**
    * Send a JSON event over the data channel. No-op if the channel isn't open
-   * yet — caller should gate on status === 'connected'.
+   * yet — caller should gate on status === 'connected' AND `dcReady`.
    */
   send(event: Record<string, unknown>): boolean {
     if (!this.dc || this.dc.readyState !== 'open') return false;
     this.dc.send(JSON.stringify(event));
     return true;
+  }
+
+  /**
+   * True when the WebRTC data channel is fully open and writable. There's a
+   * window between status='connected' and DC open where send() silently
+   * returns false — escalation injection callers must check this guard
+   * before sending paired item+response.create messages.
+   */
+  get dcReady(): boolean {
+    return this.dc?.readyState === 'open';
   }
 
   close(): void {

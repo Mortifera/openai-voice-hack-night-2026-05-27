@@ -228,9 +228,9 @@ export function App(): JSX.Element {
         `An agent named ${agentId} is blocked: ${blocker}. ` +
         `Ask the user: '${suggestedQuestion}' Be brief, terse, polite.`;
 
-      if (client.status !== 'connected') {
+      if (client.status !== 'connected' || !client.dcReady) {
         console.warn(
-          `[escalation] Realtime not connected (status=${client.status}); skipping injection`,
+          `[escalation] Realtime not ready (status=${client.status}, dcReady=${client.dcReady}); skipping injection`,
         );
         return;
       }

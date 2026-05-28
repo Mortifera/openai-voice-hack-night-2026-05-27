@@ -154,7 +154,11 @@ a,
 }
 
 .strip-small {
-  width: 12px;
+  /* width: 100% so the strip adapts to its host window. Main resizes the
+     window per state (12 dormant / 38 listening|speaking|thinking).
+     Listening/Speaking waveform bars stretch to fill the wider window
+     instead of being cramped into a 12px pill. */
+  width: 100%;
   height: 180px;
   border-radius: var(--radius-strip-small);
   border: 0.5px solid var(--border-subtle);
