@@ -26,6 +26,7 @@ import {
 import { registerToolRouterIpc } from './tool-router.js';
 import { showChatDebugWindow } from './chat-debug-window.js';
 import { registerPlannerDevIpc } from './planner.js';
+import { registerCodexPoolIpc, abortAllAgents } from './codex-pool.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
@@ -389,6 +390,7 @@ app.whenReady().then(() => {
   registerIpcHandlers();
   registerToolRouterIpc(stripWindow);
   registerPlannerDevIpc(stripWindow);
+  registerCodexPoolIpc(stripWindow);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -411,4 +413,9 @@ app.on('will-quit', () => {
 
 app.on('before-quit', () => {
   quittingExplicitly = true;
+  // Best-effort: tear down any in-flight Codex subprocesses + worktrees so
+  // the next launch starts from a clean slate. Fire-and-forget.
+  void abortAllAgents().catch((err) =>
+    console.warn('[director] abortAllAgents during before-quit failed', err),
+  );
 });
