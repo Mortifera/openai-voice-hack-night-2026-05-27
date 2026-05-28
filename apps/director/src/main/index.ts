@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, Menu, Tray, nativeImage } from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain, Menu, screen, Tray, nativeImage } from 'electron';
 import { electronApp, optimizer, is } from '@electron-toolkit/utils';
 import { config as loadDotenv } from 'dotenv';
 import { join, resolve } from 'node:path';
@@ -57,11 +57,21 @@ function createStripWindow(): BrowserWindow {
 
   const window = new BrowserWindow({
     ...bounds,
-    center: true,
     show: false,
-    frame: true,
-    resizable: true,
-    movable: true,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    closable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    hasShadow: false,
+    roundedCorners: true,
+    vibrancy: 'under-window',
+    visualEffectState: 'active',
+    type: 'panel',
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
       // sandbox:false is required because the preload is an ESM (.mjs) file —
@@ -72,6 +82,10 @@ function createStripWindow(): BrowserWindow {
       nodeIntegration: false,
     },
   });
+
+  // Float above fullscreen apps and follow the user across spaces.
+  window.setAlwaysOnTop(true, 'screen-saver');
+  window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
   window.on('ready-to-show', () => {
     window.show();
