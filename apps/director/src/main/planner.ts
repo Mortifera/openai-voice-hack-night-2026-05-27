@@ -44,9 +44,12 @@ import {
 } from './side-store.js';
 import {
   runCompaction,
+  runHealthCheckProbe,
   shouldCompact,
   type CompactionStats,
+  type ProbeMismatch,
 } from './compaction-runner.js';
+import { readWorldState as readSideStoreWorldState } from './side-store.js';
 
 const PLANNER_MODEL = 'gpt-5';
 const RESPONSES_URL = 'https://api.openai.com/v1/responses';
@@ -302,6 +305,11 @@ function fireCompactionAsync(reason: string): void {
           result.detail,
         );
       }
+      // P7.3 — Post-compaction health-check probe. Non-blocking from the
+      // caller's perspective (we're already inside the compaction promise);
+      // any mismatch queues a system-role item for the NEXT consult via
+      // `enqueueSystemInjection`. Probe failures are non-fatal.
+      await runHealthCheckProbeAndQueue(reason);
     } catch (err) {
       console.warn('[planner] compaction failed unexpectedly', err);
     } finally {
@@ -370,9 +378,25 @@ function buildBody(
   previousResponseId: string | null,
 ): ResponsesBody {
   const isFirst = !previousResponseId;
+  // P7.3 — drain any queued system injections (set by the post-compaction
+  // health-check probe on mismatch). Prepend them to the input array so
+  // the planner re-orients before processing the user turn.
+  const injections = drainSystemInjections();
+  const baseInput = isFirst
+    ? buildSystemInput(args, world)
+    : buildChainedInput(args, world);
+  const input: ResponsesInputItem[] =
+    injections.length > 0
+      ? [
+          ...injections.map(
+            (content): ResponsesInputItem => ({ role: 'system', content }),
+          ),
+          ...baseInput,
+        ]
+      : baseInput;
   const body: ResponsesBody = {
     model: PLANNER_MODEL,
-    input: isFirst ? buildSystemInput(args, world) : buildChainedInput(args, world),
+    input,
     // Instructions ALWAYS carries the harness rules so they survive
     // compaction (per compaction.md § 10.2 — only user msgs + instructions
     // are exempt from the encrypted blob).
@@ -637,4 +661,130 @@ export function registerPlannerDevIpc(mainWindow: BrowserWindow | null): void {
       }
     },
   );
+}
+
+// ─── § health-check-injection (Main — P7.3) ─────────────────────────────
+// Append-only marker per docs/contracts.md § 13.1. This block wires the
+// post-compaction health-check probe to a one-shot system-injection
+// queue. The probe is invoked from inside `fireCompactionAsync` AFTER the
+// compaction entry lands on disk; on mismatch it pushes a fresh
+// "must-preserve" system message into a FIFO queue. The next
+// `consultDirector` call drains that queue via `drainSystemInjections()`
+// and prepends each item as a `role: 'system'` input.
+//
+// Why a queue + drain (vs. inlining via a side-channel like instructions):
+//   - The `instructions` field is rebuilt from the side store on every
+//     consult anyway — it's the wrong vehicle for a one-shot signal.
+//   - Queueing decouples probe timing (which runs inside a compaction
+//     promise) from consult timing (driven by the user's next utterance).
+//   - A "drain once" semantic guarantees we never re-inject a stale
+//     mismatch after the planner has already seen it.
+//
+// Probe failures (network 5xx, parse errors, missing SDK methods) are
+// non-fatal: the probe returns `{ ok: true }`, no injection queued, and
+// the next consult proceeds normally. Instructions+world-state already
+// flow from disk on every call, so a missed probe loses ONE re-injection
+// signal — not user-visible state.
+
+/** FIFO queue of system-role contents to prepend to the next consult.
+ *  Each entry is a single full message body (already formatted). */
+const pendingSystemInjections: string[] = [];
+
+/**
+ * Push a system-role item onto the injection queue. Exported so the
+ * P6.4 hang-watchdog (sibling Main lane) can reuse this surface for its
+ * proactive narration injection if it lands later — same FIFO, same
+ * drain semantics. P7.3's only caller is `runHealthCheckProbeAndQueue`.
+ *
+ * Defensive: non-string / empty / oversize inputs are dropped with a
+ * `console.warn` so a corrupt probe response can't poison the queue.
+ */
+export function enqueueSystemInjection(content: string): void {
+  if (typeof content !== 'string' || content.length === 0) {
+    console.warn(
+      '[planner] enqueueSystemInjection ignored non-string / empty payload',
+    );
+    return;
+  }
+  // Clamp to ~8KB to keep the input body from ballooning if a probe
+  // mismatch payload turns out to be huge (e.g. a 6KB user utterance).
+  const clamped = content.length > 8192 ? `${content.slice(0, 8189)}...` : content;
+  pendingSystemInjections.push(clamped);
+}
+
+/** Drain and return the queued system injections. Called from `buildBody`
+ *  on every consult — the queue is reset after read so we never replay. */
+function drainSystemInjections(): string[] {
+  if (pendingSystemInjections.length === 0) return [];
+  const out = pendingSystemInjections.slice();
+  pendingSystemInjections.length = 0;
+  return out;
+}
+
+/** Build the must-preserve system message body from a `ProbeMismatch`.
+ *  Format chosen for ease of LLM parsing — labeled blocks the planner can
+ *  re-orient on without further structured input. */
+function formatProbeMismatchAsInjection(mismatch: ProbeMismatch): string {
+  const blocks: string[] = [
+    'Post-compaction health-check detected drift in your context.',
+    'The compacted summary disagreed with the side store. Treat the',
+    'following as ground truth before responding to the user:',
+    '',
+  ];
+  if (typeof mismatch.goal === 'string' && mismatch.goal.length > 0) {
+    blocks.push(`Current goal: ${mismatch.goal}`);
+  }
+  if (Array.isArray(mismatch.agents) && mismatch.agents.length > 0) {
+    blocks.push(`Active agents: ${mismatch.agents.join(', ')}`);
+  }
+  if (typeof mismatch.lastUser === 'string' && mismatch.lastUser.length > 0) {
+    blocks.push(`Most recent user instruction: ${mismatch.lastUser}`);
+  }
+  return blocks.join('\n');
+}
+
+/**
+ * Run the post-compaction health-check probe, queue a re-injection on
+ * mismatch. Awaited inside `fireCompactionAsync` so the compaction
+ * promise resolves AFTER the probe lands — which means
+ * `inFlightCompaction` already gates the next consult on the probe too.
+ *
+ * Never throws — probe failures are logged and treated as ok (the
+ * planner's instructions are rebuilt from disk on every consult, so a
+ * missed probe just costs us a single re-injection signal).
+ */
+async function runHealthCheckProbeAndQueue(reason: string): Promise<void> {
+  if (!compactionClient) return; // probe shares the compaction client
+  try {
+    const probe = await runHealthCheckProbe(
+      compactionClient as unknown as Parameters<typeof runHealthCheckProbe>[0],
+      readSideStoreWorldState,
+    );
+    if (!probe.ok && probe.mismatch) {
+      const injection = formatProbeMismatchAsInjection(probe.mismatch);
+      enqueueSystemInjection(injection);
+      console.warn(
+        `[planner] health-check mismatch after compaction (${reason}); queued re-injection`,
+        probe.mismatch,
+      );
+    }
+  } catch (err) {
+    // Belt-and-braces — runHealthCheckProbe is supposed to never throw,
+    // but a buggy SDK shim could. Swallow and log.
+    console.warn(
+      '[planner] health-check probe wrapper threw; treating as ok',
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/** Test-only — drain the queue without consulting. Mirrors the
+ *  `_resetPlannerStateForTests` semantics for the P7.3 surface. */
+export function _resetSystemInjectionsForTests(): void {
+  pendingSystemInjections.length = 0;
+}
+
+/** Test-only — read the current queue depth without draining. */
+export function _peekSystemInjectionsForTests(): readonly string[] {
+  return pendingSystemInjections.slice();
 }
