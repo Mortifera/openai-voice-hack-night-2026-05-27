@@ -1,10 +1,22 @@
 import { app, BrowserWindow, globalShortcut, ipcMain, Menu, screen, Tray, nativeImage } from 'electron';
 import { electronApp, optimizer, is } from '@electron-toolkit/utils';
-import { join } from 'node:path';
+import { config as loadDotenv } from 'dotenv';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { IpcChannel, type DormantState } from '../shared/ipc.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
+
+// ───────────────────────────────────────────────────────────────────────────
+// .env loading. Order: repo-root .env (wins) → apps/director/.env (fallback).
+// dotenv does not overwrite existing keys by default, so loading repo-root
+// FIRST gives it precedence. OPENAI_API_KEY must never reach the renderer —
+// the main process mints short-lived Realtime tokens instead.
+// ───────────────────────────────────────────────────────────────────────────
+const APP_DIR = resolve(__dirname, '..', '..');
+const REPO_ROOT = resolve(APP_DIR, '..', '..');
+loadDotenv({ path: resolve(REPO_ROOT, '.env') });
+loadDotenv({ path: resolve(APP_DIR, '.env') });
 
 // ───────────────────────────────────────────────────────────────────────────
 // Strip geometry (dormant baseline). See docs/ux-design.md Pass 1 & 5.
