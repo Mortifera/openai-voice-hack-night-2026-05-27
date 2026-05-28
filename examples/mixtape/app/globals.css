@@ -1,22 +1,50 @@
 @import "tailwindcss";
 
 @theme {
-  --color-bg: #0d0d10;
-  --color-surface: #16161b;
-  --color-text: #ececf0;
-  --color-text-dim: #9b9ba0;
-  --color-accent: #e07856;
+  --color-bg: #1F140A;
+  --color-bg-deep: #0e0905;
+  --color-surface: #3F2F1A;
+  --color-surface-translucent: rgba(63, 47, 26, 0.80);
+  --color-text: #ECECF0;
+  --color-text-dim: rgba(236, 236, 240, 0.60);
+  --color-accent: #C7A05A;
+  --color-accent-soft: rgba(199, 160, 90, 0.22);
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, "JetBrains Mono", "Fira Code", monospace;
+  --shadow-cassette: 0 18px 50px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(199, 160, 90, 0.12);
 }
 
 html,
 body {
-  background: var(--color-bg);
+  background: var(--color-bg-deep);
   color: var(--color-text);
   font-family: var(--font-sans);
 }
 
 body {
   min-height: 100vh;
+  background:
+    radial-gradient(ellipse 80% 60% at 50% 20%, rgba(199, 160, 90, 0.10), transparent 60%),
+    radial-gradient(ellipse 60% 50% at 80% 80%, rgba(199, 96, 60, 0.06), transparent 70%),
+    linear-gradient(180deg, #1F140A 0%, #0E0905 100%);
+  background-attachment: fixed;
+}
+
+/* perspective container for the flip */
+.flip-perspective {
+  perspective: 1400px;
+}
+
+.flip-face {
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+/* subtle grain on the card */
+.card-grain {
+  background-image:
+    radial-gradient(rgba(255, 220, 170, 0.04) 1px, transparent 1px),
+    radial-gradient(rgba(0, 0, 0, 0.10) 1px, transparent 1px);
+  background-size: 3px 3px, 5px 5px;
+  background-position: 0 0, 1px 2px;
 }

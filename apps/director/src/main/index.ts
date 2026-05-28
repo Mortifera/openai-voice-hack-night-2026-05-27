@@ -14,12 +14,14 @@ import {
 } from '../shared/ipc.js';
 import type { RealtimeEphemeralToken, RealtimeSessionRequest } from '../shared/realtime.js';
 import { mintEphemeralToken } from './realtime.js';
+import { randomUUID } from 'node:crypto';
 import {
   createCanvasWindow,
   dismissCanvas,
   registerCanvasIpc,
   renderCanvas,
   getCanvasWindow,
+  setStripWindow,
 } from './canvas.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -188,7 +190,7 @@ function registerDevCanvasShortcuts(): void {
       return;
     }
     renderCanvas({
-      component_id: 'dev-moodboard',
+      component_id: `dev-moodboard-${randomUUID()}`,
       component: 'moodboard',
       props: {
         title: 'Card material',
@@ -222,7 +224,7 @@ function registerDevCanvasShortcuts(): void {
       return;
     }
     renderCanvas({
-      component_id: 'dev-artifact',
+      component_id: `dev-artifact-${randomUUID()}`,
       component: 'artifact_preview',
       props: {
         title: 'Mixtape',
@@ -250,8 +252,8 @@ function registerDevCanvasShortcuts(): void {
       return;
     }
     renderCanvas({
-      component_id: 'dev-rule',
-      component: 'harness_flash',
+      component_id: `dev-rule-${randomUUID()}`,
+      component: 'harness_rule_save',
       props: {
         rule: 'No gradients ever.',
         why: 'Said live, T+0:42.',
@@ -333,6 +335,29 @@ function registerIpcHandlers(): void {
       }
     }
   });
+
+  // ─── window.strip.resize (W2) ────────────────────────────────────────
+  // Renderer requests new Strip geometry on stripState change. Main
+  // re-anchors to the right edge (workArea-aware) and animates the
+  // bounds change on macOS.
+  ipcMain.handle(
+    IpcChannel.WindowStripResize,
+    async (_evt, dims: StripResizeRequest): Promise<StripResizeResponse> => {
+      if (!stripWindow || stripWindow.isDestroyed()) {
+        return { ok: false, error: 'strip window not available' };
+      }
+      const width = Math.max(8, Math.min(STRIP_MAX_WIDTH, Math.round(dims.width)));
+      const height = Math.max(60, Math.min(STRIP_MAX_HEIGHT, Math.round(dims.height)));
+      lastStripDims = { width, height };
+      const bounds = computeStripBounds(width, height);
+      try {
+        stripWindow.setBounds(bounds, true);
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: String(err) };
+      }
+    },
+  );
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -352,6 +377,9 @@ app.whenReady().then(() => {
   }
 
   stripWindow = createStripWindow();
+  // Canvas positions itself relative to the Strip — hand over the ref
+  // before pre-creating the Canvas window.
+  setStripWindow(stripWindow);
   // Pre-create the Canvas window hidden so first open is instant.
   createCanvasWindow();
   registerCanvasIpc();

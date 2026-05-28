@@ -70,6 +70,34 @@
   text-transform: uppercase;
 }
 
+/* Unknown-component fallback — debug surface for unrouted canvas.render
+   payloads (options_picker, form, …). */
+.canvas-unknown {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+  overflow: hidden;
+}
+
+.canvas-unknown-json {
+  flex: 1;
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 0.5px solid var(--border-subtle);
+  background: rgba(20, 20, 22, 0.55);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  -webkit-app-region: no-drag;
+  user-select: text;
+}
+
 /* ─── shared building blocks ──────────────────────────────────────────── */
 
 .canvas-title {
