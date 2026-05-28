@@ -33,6 +33,7 @@ import {
   type ToolCallResponse,
 } from '../shared/ipc.js';
 import { renderCanvas } from './canvas.js';
+import { consultDirector, type ConsultArgs } from './planner.js';
 
 const ASK_TIMEOUT_MS = 60_000;
 
@@ -278,6 +279,38 @@ async function handleAskUser(
   };
 }
 
+async function handleConsultDirector(
+  req: ToolCallRequest,
+  args: ConsultArgs,
+): Promise<ToolCallResponse> {
+  const startedAt = Date.now();
+  if (!args || typeof args.prompt !== 'string' || args.prompt.length === 0) {
+    return {
+      ok: false,
+      callId: req.callId,
+      error: 'consult_director: missing or empty `prompt`',
+      latencyMs: Date.now() - startedAt,
+    };
+  }
+  try {
+    const result = await consultDirector(args, ctx.stripWindow);
+    return {
+      ok: true,
+      callId: req.callId,
+      output: result,
+      latencyMs: Date.now() - startedAt,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      callId: req.callId,
+      error: message,
+      latencyMs: Date.now() - startedAt,
+    };
+  }
+}
+
 async function handleUpdateHarness(
   req: ToolCallRequest,
   args: UpdateHarnessArgs,
@@ -330,6 +363,8 @@ export async function routeToolCall(req: ToolCallRequest): Promise<ToolCallRespo
         return await handleAskUser(req, args as unknown as AskUserArgs);
       case 'update_harness':
         return await handleUpdateHarness(req, args as unknown as UpdateHarnessArgs);
+      case 'consult_director':
+        return await handleConsultDirector(req, args as unknown as ConsultArgs);
       default:
         console.warn('[tool-router] unknown tool', req.name);
         return {
