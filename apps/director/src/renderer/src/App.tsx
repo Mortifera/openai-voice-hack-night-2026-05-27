@@ -10,6 +10,7 @@ import {
 import { ChatSurface, type ChatMessage } from './components/ChatSurface';
 import { StripSurface } from './components/StripSurface';
 import { devToolCall } from './lib/toolBridge';
+import type { StripStateKind } from '../../shared/state';
 
 // EscalationDetail was removed from state/sim; we now treat the
 // escalation CustomEvent payload as a structural shape rather than a
@@ -17,6 +18,21 @@ import { devToolCall } from './lib/toolBridge';
 type EscalationDetail = { reason?: string; agent?: string; [k: string]: unknown };
 
 const IS_DEV = typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production';
+
+// Strip overlay window dims per stripState — Pass 2 of docs/ux-design.md.
+// Small variants stay 12×180 right-edge pills; live states (listening /
+// speaking / thinking) grow to 38px; hive + escalating expand to 280×420.
+const STRIP_DIMS: Record<StripStateKind, { width: number; height: number }> = {
+  dormant: { width: 12, height: 180 },
+  connecting: { width: 38, height: 180 },
+  listening: { width: 38, height: 180 },
+  speaking: { width: 38, height: 180 },
+  thinking: { width: 38, height: 180 },
+  hive: { width: 280, height: 420 },
+  escalating: { width: 280, height: 420 },
+  error: { width: 12, height: 180 },
+  disconnected: { width: 12, height: 180 },
+};
 
 type Surface = 'strip' | 'chat';
 
@@ -37,6 +53,7 @@ export function App(): JSX.Element {
   const surface = getSurface();
   const { client, status: realtimeStatus, micStream, remoteStream } =
     useRealtimeClient();
+  const stripKind = useStore((s) => s.strip.kind);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [micMode, setMicMode] = useState(client.micMode);
@@ -230,6 +247,19 @@ export function App(): JSX.Element {
     window.addEventListener('director:escalation', onEscalation);
     return () => window.removeEventListener('director:escalation', onEscalation);
   }, [client]);
+
+  // Strip auto-resize per state. Only the Strip overlay window cares about
+  // resizeStrip — the Chat debug window has a normal frame and keeps its
+  // fixed size. Dims live in STRIP_DIMS per Pass 2 of docs/ux-design.md.
+  useEffect(() => {
+    if (surface !== 'strip') return;
+    const bridge = window.director;
+    if (!bridge?.window?.resizeStrip) return;
+    const dims = STRIP_DIMS[stripKind];
+    bridge.window.resizeStrip(dims).catch((err) => {
+      console.warn('[strip] resize failed', err);
+    });
+  }, [surface, stripKind]);
 
   // Dev switcher — only in development. 1-7 cycle strip states; D starts
   // the Mixtape sim; R resolves Jin; X stops; T/H fire tool-router smoke
