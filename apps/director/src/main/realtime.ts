@@ -38,6 +38,7 @@ function sessionConfig(req: RealtimeSessionRequest, model: string, voice: string
           eagerness: 'medium',
           interrupt_response: true,
         },
+        transcription: { model: 'gpt-4o-mini-transcribe' },
       },
       output: {
         // rate is REQUIRED at mint time; omission returns HTTP 400

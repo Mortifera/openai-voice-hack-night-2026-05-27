@@ -191,6 +191,7 @@ export function buildSessionUpdate(): Record<string, unknown> {
             eagerness: 'medium',
             interrupt_response: true,
           },
+          transcription: { model: 'gpt-4o-mini-transcribe' },
         },
       },
       tools: realtimeToolDefs(),
