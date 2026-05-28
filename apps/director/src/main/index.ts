@@ -6,6 +6,13 @@ import { fileURLToPath } from 'node:url';
 import { IpcChannel, type DormantState } from '../shared/ipc.js';
 import type { RealtimeEphemeralToken, RealtimeSessionRequest } from '../shared/realtime.js';
 import { mintEphemeralToken } from './realtime.js';
+import {
+  createCanvasWindow,
+  dismissCanvas,
+  registerCanvasIpc,
+  showCanvas,
+  getCanvasWindow,
+} from './canvas.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
@@ -141,6 +148,105 @@ function registerGlobalHotkey(): void {
   if (!ok) {
     console.warn(`[director] failed to register hotkey ${accelerator}`);
   }
+
+  // ─── Dev keystrokes — manual Canvas QA without the Realtime layer. ────
+  // Cmd+Shift+4 → toggle Mixtape moodboard
+  // Cmd+Shift+5 → toggle Mixtape artifact reveal
+  // Cmd+Shift+6 → toggle Harness rule-save flash
+  // Cmd+Shift+0 → dismiss Canvas
+  if (is.dev) {
+    registerDevCanvasShortcuts();
+  }
+}
+
+function registerDevCanvasShortcuts(): void {
+  const matteVinyl = `file://${resolve(APP_DIR, 'src/renderer/src/assets/matte-vinyl.png')}`;
+  const cassette = `file://${resolve(APP_DIR, 'src/renderer/src/assets/cassette.png')}`;
+  const holographic = `file://${resolve(APP_DIR, 'src/renderer/src/assets/holographic.png')}`;
+  const tokyoNeon = `file://${resolve(APP_DIR, 'src/renderer/src/assets/tokyo-neon.png')}`;
+
+  const toggleMoodboard = (): void => {
+    if (getCanvasWindow()?.isVisible()) {
+      dismissCanvas();
+      return;
+    }
+    showCanvas({
+      componentId: 'dev-moodboard',
+      component: 'moodboard',
+      props: {
+        title: 'Card material',
+        concepts: [
+          {
+            id: 'matte-vinyl',
+            label: 'Matte Vinyl',
+            description: 'Premium, monochrome, calm',
+            image_url: matteVinyl,
+          },
+          {
+            id: 'cassette',
+            label: 'Cassette',
+            description: 'Translucent amber, warm 80s',
+            image_url: cassette,
+          },
+          {
+            id: 'holographic',
+            label: 'Holographic',
+            description: 'Iridescent foil, playful',
+            image_url: holographic,
+          },
+        ],
+      },
+    });
+  };
+
+  const toggleArtifact = (): void => {
+    if (getCanvasWindow()?.isVisible()) {
+      dismissCanvas();
+      return;
+    }
+    showCanvas({
+      componentId: 'dev-artifact',
+      component: 'artifact_preview',
+      props: {
+        title: 'Mixtape',
+        notes: 'Tokyo Neon · 6 tracks',
+        mixtape: {
+          vibe: 'late-night drive through Tokyo neon',
+          coverUrl: tokyoNeon,
+          tracks: [
+            { title: 'Midnight Driver', artist: 'Akira Vance', runtime: '4:12' },
+            { title: 'Velvet Apartment', artist: 'Noémie Hara', runtime: '3:48' },
+            { title: 'Neon Rain', artist: 'Sable Sound', runtime: '5:02' },
+            { title: 'Hyperreal', artist: 'Yoko & The Visa', runtime: '4:31' },
+            { title: 'Lights From The Tower', artist: 'CHROMERIDER', runtime: '3:55' },
+            { title: 'Akihabara Sunrise', artist: 'Aoi Tanaka', runtime: '4:24' },
+          ],
+        },
+        actions: ['ship', 'iterate', 'discard'],
+      },
+    });
+  };
+
+  const toggleRule = (): void => {
+    if (getCanvasWindow()?.isVisible()) {
+      dismissCanvas();
+      return;
+    }
+    showCanvas({
+      componentId: 'dev-rule',
+      component: 'harness_flash',
+      props: {
+        rule: 'No gradients ever.',
+        why: 'Said live, T+0:42.',
+      },
+      autoDismissMs: 1200,
+    });
+  };
+
+  globalShortcut.register('CommandOrControl+Shift+4', toggleMoodboard);
+  globalShortcut.register('CommandOrControl+Shift+5', toggleArtifact);
+  globalShortcut.register('CommandOrControl+Shift+6', toggleRule);
+  globalShortcut.register('CommandOrControl+Shift+0', () => dismissCanvas());
 }
 
 function registerIpcHandlers(): void {
@@ -181,6 +287,9 @@ app.whenReady().then(() => {
   }
 
   stripWindow = createStripWindow();
+  // Pre-create the Canvas window hidden so first open is instant.
+  createCanvasWindow();
+  registerCanvasIpc();
   createTray();
   registerGlobalHotkey();
   registerIpcHandlers();
