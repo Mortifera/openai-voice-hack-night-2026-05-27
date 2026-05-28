@@ -197,8 +197,14 @@ export async function consultDirector(
         continue;
       }
 
+      // Be permissive on the reasoning event name — OpenAI has used both
+      // response.reasoning_summary_text.delta and response.reasoning_text.delta
+      // across model versions. If we ever see neither + nothing in output,
+      // diagnostic log below will surface it.
       if (
-        event.type === 'response.reasoning_summary_text.delta' &&
+        (event.type === 'response.reasoning_summary_text.delta' ||
+          event.type === 'response.reasoning_text.delta' ||
+          event.type === 'response.reasoning.delta') &&
         typeof event.delta === 'string'
       ) {
         reasoningSummary += event.delta;
@@ -208,6 +214,14 @@ export async function consultDirector(
         typeof event.delta === 'string'
       ) {
         finalText += event.delta;
+      } else if (event.type === 'response.failed' || event.type === 'error') {
+        // Surface API errors to the caller so we don't silently return empty.
+        const errMsg =
+          (event as { error?: { message?: string } }).error?.message ??
+          (event as { message?: string }).message ??
+          'unknown planner error';
+        console.error('[planner] stream error event:', errMsg, event);
+        throw new Error(`[planner] stream error: ${errMsg}`);
       }
       // Other event types (response.created, response.completed, …) are
       // informational; we don't need them for the synthesis.
@@ -216,6 +230,14 @@ export async function consultDirector(
 
   const decisions = parseDecisions(finalText);
   const summary = reasoningSummary.trim() || finalText.trim().slice(0, 280);
+
+  // Diagnostic: if we got nothing at all, the SSE event types may have
+  // shifted on the API side. Log so we can spot it fast.
+  if (!summary && !finalText) {
+    console.warn(
+      '[planner] stream produced no usable text — check Responses API event names',
+    );
+  }
 
   return { summary, decisions, full_text: finalText };
 }
