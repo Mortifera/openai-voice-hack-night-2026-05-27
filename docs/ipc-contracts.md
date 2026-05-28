@@ -426,7 +426,75 @@ interface AppErrorPayload {
 
 ---
 
-## 9. Conventions
+## 9. `canvas.*` and `ask.*` (tool router)
+
+The W3 tool router owns three additional channels beyond the canvas window's own surface (`shared/canvas-ipc.ts`).
+
+### `canvas.render` — main→any (send) — observer bus
+
+Re-broadcast of every Canvas open the tool router triggers. The canonical channel that the Canvas BrowserWindow listens on is `CanvasIpcChannel.Render` (same wire string). The mirror on the main IPC bus is for any other observer (telemetry, future state replication).
+
+```ts
+interface CanvasRenderBroadcastPayload {
+  component: string;
+  props: Record<string, unknown>;
+  component_id?: string;
+  call_id?: string;
+  autoDismissMs?: number;
+}
+```
+
+**Trigger**: `routeToolCall({name:'render_canvas',...})` or any router-side flash (e.g. `harness_rule_save` after `update_harness`).
+**Consumer**: Canvas BrowserWindow (canonical render), plus any other window that subscribed for observability.
+
+### `ask.show` — main→strip renderer (send)
+
+Tool-router prompts the user. The strip renderer surfaces the question (voice + visual) and resolves via `ask.answer`. Main times the prompt out at 60s.
+
+```ts
+interface AskShowPayload {
+  ask_id: string;          // correlate with the eventual answer
+  question: string;
+  options?: string[];      // canonical option labels (if any)
+  call_id?: string;        // tool-call id when triggered by ask_user
+}
+```
+
+### `ask.answer` — renderer→main (send)
+
+```ts
+interface AskAnswerPayload {
+  ask_id: string;
+  answer: string;          // "timeout" when the main-side prompt expired
+}
+```
+
+---
+
+## 10. Renderer-only event: `director:escalation`
+
+Not an Electron IPC channel — a renderer-side `window` CustomEvent. The agent simulator (`renderer/state/sim.ts`) dispatches it the moment the demo's `blockAgent('jin', ...)` fires. The orchestration layer (later wiring) listens, builds a server-initiated `conversation.item.create` + `response.create` per `docs/research/gpt-realtime-2.md` §8, and routes it onto the live Realtime data channel so Director speaks unprompted.
+
+```ts
+interface EscalationDetail {
+  agent_id: string;          // e.g. 'jin'
+  blocker: string;           // human-readable blocker, e.g. 'Stripe staging API key not in env'
+  suggested_question: string; // the question Director should ask, verbatim
+}
+
+window.dispatchEvent(
+  new CustomEvent<EscalationDetail>('director:escalation', { detail }),
+);
+```
+
+**Trigger**: sim's `blockAgent` step fires at canonical T+1:45 (compressed T+~20s).
+**Consumer**: any renderer-side listener — App.tsx logs it today; the orchestration bridge will pick it up next.
+
+This decouples sim → speech: no IPC round-trip, no preload changes, no W1 dependency. The bridge can be swapped in without touching the simulator.
+
+---
+
+## 11. Conventions
 
 - **All channels are declared in `apps/director/src/shared/ipc.ts`** as the `IpcChannel` enum.
 - **All payload and response types are exported as named TypeScript interfaces from the same file.** No `unknown`-typed payloads outside the dispatch boundary (which validates and narrows immediately).
