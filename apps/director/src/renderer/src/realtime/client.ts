@@ -192,7 +192,7 @@ export class RealtimeClient {
       const result = await bridge.tool.call(req);
       // Always feed *something* back so the model isn't left hanging.
       const output = result.ok ? result.output : { error: result.error };
-      this.send({
+      const sentItem = this.send({
         type: 'conversation.item.create',
         item: {
           type: 'function_call_output',
@@ -200,7 +200,15 @@ export class RealtimeClient {
           output: JSON.stringify(output),
         },
       });
-      this.send({ type: 'response.create' });
+      const sentResp = this.send({ type: 'response.create' });
+      // Slow tools (consult_director hits gpt-5 for 3–8s) can outlast the
+      // data-channel. If send fails the model hangs silently waiting for
+      // the function_call_output. Surface the drop so we notice.
+      if (!sentItem || !sentResp) {
+        console.warn(
+          `[realtime] tool.result inject dropped (sentItem=${sentItem}, sentResp=${sentResp}, callId=${req.callId}, name=${req.name}) — DC closed mid-call`,
+        );
+      }
     } catch (err) {
       console.error('[realtime] tool dispatch failed', err);
       // Best-effort error injection so the model can continue.

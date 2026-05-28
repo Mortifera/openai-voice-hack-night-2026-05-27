@@ -1,6 +1,6 @@
 # Director — Contracts
 
-> **Version**: 2026-05-27.4
+> **Version**: 2026-05-27.5
 > **Status**: Source of truth for cross-worker integration. Every agent prompt MUST point at this doc. Every contract change is a commit that updates the version above.
 
 This file is the single shared boundary between workers. If two workers are about to touch the same shape, this is where they agree on it BEFORE writing code. The hackathon retrospective made the diagnosis: subsystems worked in isolation; the integration boundary failed because no canonical contract existed. This is that document.
@@ -70,24 +70,36 @@ Two workers ending up with different shapes for the same channel = a coordinatio
 All shared types live in `apps/director/src/shared/`. Importing from this directory is the canonical way to use a type — never redeclare locally.
 
 ### 2.1 `Agent` (state.ts)
+
+Synced to code 2026-05-27.5. AgentRole is open (allows non-canonical roles via `| string`); AgentStatus replaces the old `'idle'` with `'spawning'` and adds `'thinking'` + `'killed'`.
+
 ```ts
-export type AgentRole = 'frontend' | 'backend' | 'data' | 'design';
-export type AgentStatus = 'idle' | 'working' | 'blocked' | 'done' | 'error';
+export type AgentId = string;
+export type AgentRole = 'Frontend' | 'Backend' | 'Data' | 'Design' | string;
+export type AgentStatus = 'spawning' | 'working' | 'blocked' | 'thinking' | 'done' | 'error' | 'killed';
+
 export interface Agent {
-  id: string;                  // stable per session, e.g. 'maya'
-  name: string;                // display name 'Maya'
+  id: AgentId;                       // stable per session, e.g. 'maya'
+  name: string;                      // display name 'Maya'
   role: AgentRole;
-  accent: string;              // hex color, no token (Pass 4 identity table)
+  accentColor: `#${string}`;         // hex literal — drives Hive accent ring
   status: AgentStatus;
-  trail: string;               // italic micro-text shown under name
-  files: string[];             // last 3 file paths touched
-  blocker?: string;            // populated when status === 'blocked'
-  progress?: number;           // 0–1 optional
-  startedAt?: number;          // ms epoch
+  currentTask: string | null;
+  taskTrail: string[];               // ring buffer, cap 8
+  recentFiles: string[];             // cap 3
+  blocker: string | null;            // populated when status === 'blocked'
+  progress?: number;                 // 0..1 optional UI fill
+  worktreePath: string | null;       // git worktree absolute path (set by Codex pool)
+  codexThreadId: string | null;      // Codex SDK thread id
+  dispatchedAt: number;              // ms epoch
+  finishedAt: number | null;         // ms epoch on terminal status
 }
 ```
 
 ### 2.2 `StripState` (state.ts)
+
+Synced 2026-05-27.5. `connecting` and `error` kinds carry additional fields.
+
 ```ts
 export type StripStateKind =
   | 'dormant' | 'connecting' | 'listening' | 'speaking' | 'thinking'
@@ -95,7 +107,7 @@ export type StripStateKind =
 
 export type StripState =
   | { kind: 'dormant' }
-  | { kind: 'connecting' }
+  | { kind: 'connecting'; attempt: number; since: number }
   | { kind: 'listening'; mode: 'tap' | 'hold'; since: number }
   | { kind: 'speaking'; itemId: string; phase: 'commentary' | 'final_answer'; since: number }
   | { kind: 'thinking'; trail: string[]; since: number }
@@ -106,34 +118,66 @@ export type StripState =
 ```
 
 ### 2.3 `CanvasState` (state.ts)
+
+Synced 2026-05-27.5. Now has explicit phase state machine + queue.
+
 ```ts
+export type CanvasComponentName =
+  | 'moodboard' | 'options_picker' | 'diagram' | 'code_preview' | 'form'
+  | 'agent_pod' | 'artifact_preview' | 'html_escape' | 'harness_flash';
+
+export interface CanvasQueueEntry {
+  componentId: string;
+  component: CanvasComponentName;
+  props: Record<string, unknown>;
+  interactive: boolean;
+}
+
 export interface CanvasState {
   open: boolean;
-  componentId?: string;         // orchestrator-generated, correlates render → response
-  component?: string;           // 'moodboard' | 'artifact_preview' | 'harness_rule_save' | ...
-  props?: Record<string, unknown>;
-  awaitingResponse: boolean;
-  callId?: string;              // ties to original Realtime tool call
+  phase: 'hidden' | 'opening' | 'open' | 'awaiting-response' | 'dismissing';
+  componentId: string | null;
+  component: CanvasComponentName | null;
+  props: Record<string, unknown> | null;
+  interactive: boolean;
+  dismissTimerId: number | null;  // setTimeout handle (400ms post-response auto-dismiss)
+  openedAt: number | null;
+  queue: CanvasQueueEntry[];
 }
 ```
 
 ### 2.4 `HarnessRule` (state.ts)
+
+Synced 2026-05-27.5. Adds `id`, `scope`, `source` — all required.
+
 ```ts
 export interface HarnessRule {
-  rule: string;
-  why: string;
-  timestamp: number;
+  id: string;                                          // 'rule-<ts>-<nonce>'
+  rule: string;                                        // the rule itself
+  why: string;                                         // context tying back to user intent
+  timestamp: number;                                   // ms epoch
+  scope: 'global' | 'project' | 'task';
+  source: 'user-utterance' | 'inferred' | 'system';
 }
 ```
 
 ### 2.5 `TranscriptItem` (state.ts)
+
+Synced 2026-05-27.5. Field is `content` (not `text`); adds `id`, `realtimeItemId`, `metadata`.
+
 ```ts
+export type TranscriptRole = 'user' | 'assistant' | 'system';
+export type TranscriptMetadataKind =
+  | 'proactive_announcement' | 'world-state-brief' | 'tool_call' | 'tool_result';
+
 export interface TranscriptItem {
-  role: 'user' | 'assistant' | 'system';
-  text: string;
-  phase?: 'commentary' | 'final_answer';   // per gpt-realtime-2 §preamble
+  id: string;
+  role: TranscriptRole;
+  content: string;
+  phase?: 'commentary' | 'final_answer';
   timestamp: number;
-  itemId?: string;
+  realtimeItemId?: string;
+  metadata?: { kind?: TranscriptMetadataKind };
 }
 ```
 
@@ -154,10 +198,14 @@ export interface Mixtape {
 ```
 
 ### 2.7 `RealtimeEphemeralToken` (realtime.ts)
+
+Synced 2026-05-27.5. Adds `model` field echoed back by the mint endpoint.
+
 ```ts
 export interface RealtimeEphemeralToken {
   value: string;
   expiresAt: number;           // ms epoch
+  model: string;               // model id echoed back so renderer can target the right URL
 }
 ```
 
