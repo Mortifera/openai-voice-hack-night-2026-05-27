@@ -115,7 +115,10 @@ export function createCanvasWindow(): BrowserWindow {
     type: 'panel',
     webPreferences: {
       preload: join(__dirname, '../preload/canvas.mjs'),
-      sandbox: true,
+      // sandbox:false matches the strip preload — .mjs preloads under
+      // sandbox:true silently fail to expose the contextBridge surface.
+      // See docs/contracts.md § 9.2.
+      sandbox: false,
       contextIsolation: true,
       nodeIntegration: false,
       backgroundThrottling: false,
