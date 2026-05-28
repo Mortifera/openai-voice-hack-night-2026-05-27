@@ -1,6 +1,8 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import {
   IpcChannel,
+  type AskAnswerPayload,
+  type AskShowPayload,
   type DirectorBridge,
   type DormantState,
   type HotkeyListener,
@@ -8,6 +10,7 @@ import {
   type ToolCallResponse,
   type ToolResultPayload,
   type MicStatusPayload,
+  type StatePatchPayload,
   type StripResizeRequest,
   type StripResizeResponse,
 } from '../shared/ipc.js';
@@ -61,6 +64,23 @@ const api: DirectorBridge = {
   window: {
     resizeStrip(dims: StripResizeRequest): Promise<StripResizeResponse> {
       return ipcRenderer.invoke(IpcChannel.WindowStripResize, dims);
+    },
+  },
+  state: {
+    onPatch(cb) {
+      const listener = (_evt: unknown, payload: StatePatchPayload): void => cb(payload);
+      ipcRenderer.on(IpcChannel.StatePatch, listener);
+      return () => ipcRenderer.removeListener(IpcChannel.StatePatch, listener);
+    },
+  },
+  ask: {
+    onShow(cb) {
+      const listener = (_evt: unknown, payload: AskShowPayload): void => cb(payload);
+      ipcRenderer.on(IpcChannel.AskShow, listener);
+      return () => ipcRenderer.removeListener(IpcChannel.AskShow, listener);
+    },
+    answer(payload: AskAnswerPayload): void {
+      ipcRenderer.send(IpcChannel.AskAnswer, payload);
     },
   },
 };

@@ -388,6 +388,19 @@ export interface DirectorBridge {
   window: {
     resizeStrip: (dims: StripResizeRequest) => Promise<StripResizeResponse>;
   };
+  /** State-patch fan-out (W3.tool-router). Main pushes typed mutations
+   *  that the renderer applies via `state/ipcSync.ts` into the canonical
+   *  Zustand store. */
+  state: {
+    onPatch: (cb: (payload: StatePatchPayload) => void) => () => void;
+  };
+  /** Ask-user prompt channel (W3.tool-router). Strip renderer surfaces
+   *  the prompt and replies via `answer()` once the user responds (voice
+   *  resolution or click). */
+  ask: {
+    onShow: (cb: (payload: AskShowPayload) => void) => () => void;
+    answer: (payload: AskAnswerPayload) => void;
+  };
 }
 
 declare global {
