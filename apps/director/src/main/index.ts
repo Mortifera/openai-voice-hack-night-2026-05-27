@@ -24,6 +24,7 @@ import {
   setStripWindow,
 } from './canvas.js';
 import { registerToolRouterIpc } from './tool-router.js';
+import { showChatDebugWindow } from './chat-debug-window.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
@@ -132,6 +133,12 @@ function buildTrayMenu(): Menu {
         } else {
           stripWindow.show();
         }
+      },
+    },
+    {
+      label: 'Show Chat (debug)',
+      click: () => {
+        showChatDebugWindow();
       },
     },
     {
