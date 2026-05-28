@@ -13,7 +13,8 @@
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "pnpm typecheck:node && pnpm typecheck:web",
     "test": "vitest run",
-    "package": "electron-vite build && electron-builder --mac --dir"
+    "package": "electron-vite build && electron-builder --mac --dir",
+    "dogfood:mixtape": "tsx scripts/dogfood-mixtape.mts"
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.1",
@@ -40,6 +41,7 @@
     "electron-vite": "^2.3.0",
     "postcss": "^8.4.49",
     "tailwindcss": "^4.0.0-beta.4",
+    "tsx": "^4.19.2",
     "typescript": "^5.6.3",
     "vite": "^5.4.11",
     "vitest": "^2.1.9"

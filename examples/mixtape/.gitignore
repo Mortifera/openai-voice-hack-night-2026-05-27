@@ -3,3 +3,6 @@ node_modules
 out
 .env*.local
 *.tsbuildinfo
+
+# Runtime fixture — written by lib/store (Cleo). Never committed.
+data/mixtapes.json
