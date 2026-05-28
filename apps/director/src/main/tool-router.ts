@@ -41,29 +41,28 @@ const ASK_TIMEOUT_MS = 60_000;
 
 interface AgentIdentity {
   id: 'maya' | 'jin' | 'cleo' | 'wren';
+  name: string;
+  role: 'Frontend' | 'Backend' | 'Data' | 'Design';
   accentColor: `#${string}`;
 }
 
 const IDENTITY: Record<string, AgentIdentity> = {
-  maya: { id: 'maya', accentColor: '#E07856' },
-  jin: { id: 'jin', accentColor: '#4A9E9C' },
-  cleo: { id: 'cleo', accentColor: '#C99550' },
-  wren: { id: 'wren', accentColor: '#9670A0' },
+  maya: { id: 'maya', name: 'Maya', role: 'Frontend', accentColor: '#E07856' },
+  jin: { id: 'jin', name: 'Jin', role: 'Backend', accentColor: '#4A9E9C' },
+  cleo: { id: 'cleo', name: 'Cleo', role: 'Data', accentColor: '#C99550' },
+  wren: { id: 'wren', name: 'Wren', role: 'Design', accentColor: '#9670A0' },
 };
 
-function resolveIdentity(rawName: string): AgentIdentity {
-  const slug = rawName.trim().toLowerCase();
+function resolveIdentity(agentSlug: string): AgentIdentity {
+  const slug = agentSlug.trim().toLowerCase();
   if (slug in IDENTITY) return IDENTITY[slug as keyof typeof IDENTITY]!;
-  return { id: slug as AgentIdentity['id'], accentColor: '#9AA0A6' };
-}
-
-function capitalizeRole(role: string): 'Frontend' | 'Backend' | 'Data' | 'Design' | string {
-  const r = role.toLowerCase();
-  if (r === 'frontend') return 'Frontend';
-  if (r === 'backend') return 'Backend';
-  if (r === 'data') return 'Data';
-  if (r === 'design') return 'Design';
-  return role.charAt(0).toUpperCase() + role.slice(1);
+  // Fallback for unknown agents — synthesize from slug.
+  return {
+    id: slug as AgentIdentity['id'],
+    name: slug.charAt(0).toUpperCase() + slug.slice(1),
+    role: 'Frontend',
+    accentColor: '#9AA0A6',
+  };
 }
 
 // ─── Wiring state ────────────────────────────────────────────────────────
@@ -124,8 +123,8 @@ interface RenderCanvasArgs {
 }
 
 interface DispatchAgentMockArgs {
-  name: string;
-  role: string;
+  /** Closed enum of canonical agents — schema constrains to maya/jin/cleo/wren. */
+  agent: string;
   task: string;
 }
 
@@ -193,14 +192,16 @@ async function handleDispatchAgentMock(
   args: DispatchAgentMockArgs,
 ): Promise<ToolCallResponse> {
   const startedAt = Date.now();
-  const identity = resolveIdentity(args.name);
-  const role = capitalizeRole(args.role);
+  // Schema constrains `agent` to the enum {maya|jin|cleo|wren}; derive name+role
+  // from the canonical IDENTITY table. Closed enum prevents the AI from
+  // hallucinating role/name pairs that don't match.
+  const identity = resolveIdentity(args.agent);
   const agentId = identity.id;
 
   const agent = {
     id: agentId,
-    name: args.name.trim() || agentId,
-    role,
+    name: identity.name,
+    role: identity.role,
     accentColor: identity.accentColor,
     status: 'working' as const,
     currentTask: args.task,

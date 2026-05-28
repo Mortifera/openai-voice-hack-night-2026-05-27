@@ -160,6 +160,11 @@ export function realtimeToolDefs(): Array<Record<string, unknown>> {
         type: 'object',
         properties: {
           rule: { type: 'string', description: 'The rule, in one sentence.' },
+          why: {
+            type: 'string',
+            description:
+              'Why this rule matters — one sentence of context tying it to what the user said or the situation that produced it.',
+          },
           scope: {
             type: 'string',
             enum: ['project', 'global'],
@@ -167,7 +172,7 @@ export function realtimeToolDefs(): Array<Record<string, unknown>> {
               'Whether the rule applies to this project only or to all projects.',
           },
         },
-        required: ['rule'],
+        required: ['rule', 'why'],
       },
     },
     {
