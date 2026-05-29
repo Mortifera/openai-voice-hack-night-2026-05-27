@@ -11,12 +11,11 @@
  *
  * Spec: docs/remaining-phases.md § 5.3 ("Strip-as-Canvas-handle").
  *
- * Note: the Strip BrowserWindow is currently created with `movable: false`
- * (apps/director/src/main/index.ts). Until W3/Main flips that to `true`
- * while the canvas is open, this hook is the visual half — the cursor
- * affordance is correct and the wiring is in place for the moment the
- * underlying window becomes movable. We deliberately do NOT touch main in
- * this lane.
+ * The Strip BrowserWindow is created with `movable: false`
+ * (apps/director/src/main/index.ts). This hook flips the window movable via
+ * the `window.setStripMovable` IPC (gap 9) while the Canvas is open, and
+ * back to non-movable on close, so the user can reposition the Strip (and
+ * the Canvas follows) only during an active Canvas session.
  */
 
 import { useEffect } from 'react';
@@ -27,6 +26,11 @@ export function useStripDragHandle(): void {
   useEffect(() => {
     if (typeof document === 'undefined') return;
     const html = document.documentElement;
+    // ─── § renderer-wireup (gap 9) ──────────────────────────────────────
+    // Toggle the underlying Strip window movable flag in main. Best-effort —
+    // the bridge is absent in non-Electron contexts (tests, chat surface).
+    const bridge = window.director;
+    bridge?.windowControl?.setStripMovable({ movable: canvasOpen });
     if (canvasOpen) {
       html.dataset.stripDrag = 'on';
     } else {
@@ -34,6 +38,8 @@ export function useStripDragHandle(): void {
     }
     return () => {
       delete html.dataset.stripDrag;
+      // On unmount, restore the non-movable default.
+      window.director?.windowControl?.setStripMovable({ movable: false });
     };
   }, [canvasOpen]);
 }

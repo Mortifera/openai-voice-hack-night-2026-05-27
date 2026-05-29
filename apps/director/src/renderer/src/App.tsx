@@ -101,6 +101,96 @@ export function App(): JSX.Element {
     };
   }, [client, surface]);
 
+  // ─── § renderer-wireup (gaps 1/2/10/11) — degradation + rotation UX ──────
+  // Gated to the strip surface so the chat-debug window never drives Canvas
+  // cards or rotation. Wires the client's UX hooks (mic-denied / persistent-
+  // degraded / rotation-failed) to the Canvas window + main-process effects,
+  // arms the T+55 rotation timer once connected, and surfaces api_key_missing
+  // on a token-mint 401.
+  useEffect(() => {
+    if (surface !== 'strip') return;
+    const bridge = window.director;
+
+    const openCard = (
+      component: string,
+      props: Record<string, unknown> = {},
+      componentId?: string,
+    ): void => {
+      // Drive the real Canvas window (the strip store's openCanvas is local
+      // only). Best-effort — bridge is absent outside Electron.
+      bridge?.canvas?.render({
+        component,
+        props,
+        component_id: componentId ?? `${component}-${Date.now()}`,
+      });
+    };
+
+    // Speak a short apology through the live peer (best-effort; no-op if the
+    // data channel isn't open). Mirrors the escalation injection pattern.
+    const speakApology = (text: string): void => {
+      if (client.status !== 'connected' || !client.dcReady) return;
+      client.send({
+        type: 'conversation.item.create',
+        item: {
+          type: 'message',
+          role: 'system',
+          content: [{ type: 'input_text', text: `Say exactly: "${text}" Be terse.` }],
+        },
+      });
+      client.send({ type: 'response.create' });
+    };
+
+    client.setUxHooks({
+      // gap 10 — mic permission denied.
+      onMicDenied: () => {
+        openCard('mic_denied', {}, 'degrade-mic-denied');
+        speakApology("I can't hear you. Mic permission needed.");
+      },
+      // gap 2 — persistent degraded after retries: notification + tray dot
+      // (via main) + degraded/rotation Canvas card with a text-fallback hint.
+      onPersistentDegraded: (info) => {
+        bridge?.app?.notifyDegraded({
+          outageMs: info.outageMs,
+          attempt: info.attempt,
+        });
+        openCard(
+          'rotation_failed',
+          { message: 'Director is offline — reconnecting. You can type instead.' },
+          'degrade-offline-persistent',
+        );
+      },
+      // gap (P6.6) — rotation failed 3×: soft rotation_failed card.
+      onRotationFailed: () => {
+        openCard(
+          'rotation_failed',
+          { message: 'Session will reset in ~1s — sorry for the blip.' },
+          'degrade-rotation-failed',
+        );
+      },
+    });
+
+    // gap 11 — token mint failed. 401 (or missing key) → api_key_missing card.
+    const offMintError = bridge?.realtimeErrors?.onMintError((payload) => {
+      if (payload.status === 401) {
+        openCard('api_key_missing', {}, 'degrade-api-key-missing');
+        speakApology('OpenAI key needed.');
+      } else {
+        console.warn('[realtime] mint error (non-auth)', payload);
+      }
+    });
+
+    return () => {
+      offMintError?.();
+    };
+  }, [client, surface]);
+
+  // gap 1 — arm the T+55 rotation timer once the strip session connects.
+  useEffect(() => {
+    if (surface !== 'strip') return;
+    if (realtimeStatus !== 'connected') return;
+    client.enableRotationTimer();
+  }, [client, surface, realtimeStatus]);
+
   // Keep the newest transcript turn pinned in view.
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: 'end', behavior: 'smooth' });

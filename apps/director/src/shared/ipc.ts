@@ -122,6 +122,30 @@ export const IpcChannel = {
    *  goal change. Main keeps no full mirror, so the renderer (canonical
    *  store) is the push source. See remaining-phases.md gap 5. */
   StateSnapshotPush: 'state.snapshotPush',             // gap 5 — persistence
+  // ─── § renderer-wireup (gaps 1/2/6/8/9/10/11) ────────────────────────
+  /** Strip renderer → main: relay a canvas.render to the Canvas window so
+   *  the strip can surface degradation cards + the resume picker. Main
+   *  forwards to `CanvasIpcChannel.Render`. */
+  StripCanvasRender: 'strip.canvas.render',            // renderer-wireup
+  /** Main → strip renderer: a `canvas.user_response` was committed by the
+   *  Canvas window. Lets the strip resolve the resume picker / onboarding. */
+  CanvasUserResponseRelay: 'canvas.user_response.relay', // renderer-wireup
+  /** Strip renderer → main: persist onboarding values (projectPath, voice,
+   *  apiKey) to meta.json + harness.json + .env. See gap 8. */
+  AppOnboardingComplete: 'app.onboardingComplete',     // renderer-wireup (gap 8)
+  /** Strip renderer → main: toggle the Strip window's `movable` flag while
+   *  the Canvas is open (strip-as-canvas-handle). See gap 9. */
+  WindowSetStripMovable: 'window.setStripMovable',     // renderer-wireup (gap 9)
+  /** Strip renderer → main: surface a persistent-degraded macOS notification
+   *  + flip the tray indicator red. Fire-and-forget. See gap 2. */
+  AppNotifyDegraded: 'app.notifyDegraded',             // renderer-wireup (gap 2)
+  /** Main → strip renderer: token mint failed (e.g. HTTP 401). Renderer
+   *  surfaces the api_key_missing card. See gap 11. */
+  RealtimeMintError: 'realtime.mintError',             // renderer-wireup (gap 11)
+  /** Strip renderer → main: the resume picker resolved. `resume` re-points
+   *  the side store at the existing session + stages its snapshot; `fresh`
+   *  keeps the boot-minted session. See gap 6. */
+  SessionResume: 'session.resume',                     // renderer-wireup (gap 6)
 } as const;
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel];
@@ -504,6 +528,9 @@ export interface DirectorBridge {
     onResumeAvailable: (
       cb: (payload: SessionResumeAvailablePayload) => void,
     ) => () => void;
+    // ─── § renderer-wireup (gap 6) ──────────────────────────────────────
+    /** Resolve the resume picker: hydrate the prior session or keep fresh. */
+    resume: (payload: SessionResumePayload) => Promise<SessionResumeResponse>;
   };
   // ─── § persistence-wiring (gap 5) ─────────────────────────────────────
   /** Push the serializable store to main so it can persist
@@ -512,6 +539,38 @@ export interface DirectorBridge {
    *  Fire-and-forget — a failed persist never blocks the renderer. */
   persistence: {
     pushSnapshot: (payload: StateSnapshotPushPayload) => void;
+  };
+  // ─── § renderer-wireup (gaps 1/2/6/8/9/10/11) ─────────────────────────
+  /** Canvas window control + response observation from the strip renderer.
+   *  The strip's `commands.openCanvas` only mutates local state; to make a
+   *  card actually appear in the Canvas window the strip must relay a
+   *  `canvas.render` through main. Responses come back via onUserResponse. */
+  canvas: {
+    /** Relay a render payload to the Canvas window (degradation cards,
+     *  resume picker). Fire-and-forget. */
+    render: (payload: StripCanvasRenderPayload) => void;
+    /** Subscribe to canvas user responses relayed from main. */
+    onUserResponse: (
+      cb: (payload: CanvasUserResponseRelayPayload) => void,
+    ) => () => void;
+  };
+  /** App-level main-process effects driven by the strip renderer. */
+  app: {
+    /** gap 8 — persist onboarding values (meta.json + harness.json + .env). */
+    onboardingComplete: (
+      payload: AppOnboardingCompletePayload,
+    ) => Promise<AppOnboardingCompleteResponse>;
+    /** gap 2 — surface the persistent-degraded notification + tray dot. */
+    notifyDegraded: (payload: AppNotifyDegradedPayload) => void;
+  };
+  /** gap 9 — toggle the Strip window's `movable` flag from the drag-handle
+   *  hook while the Canvas is open. Fire-and-forget. */
+  windowControl: {
+    setStripMovable: (payload: WindowSetStripMovablePayload) => void;
+  };
+  /** gap 11 — observe token-mint failures (HTTP 401 → api_key_missing). */
+  realtimeErrors: {
+    onMintError: (cb: (payload: RealtimeMintErrorPayload) => void) => () => void;
   };
 }
 
@@ -551,6 +610,12 @@ export interface IpcSendMap {
   [IpcChannel.SessionResumeAvailable]: SessionResumeAvailablePayload;
   // § persistence-wiring (gap 5)
   [IpcChannel.StateSnapshotPush]: StateSnapshotPushPayload;
+  // § renderer-wireup (gaps 1/2/6/8/9/10/11)
+  [IpcChannel.StripCanvasRender]: StripCanvasRenderPayload;
+  [IpcChannel.CanvasUserResponseRelay]: CanvasUserResponseRelayPayload;
+  [IpcChannel.WindowSetStripMovable]: WindowSetStripMovablePayload;
+  [IpcChannel.AppNotifyDegraded]: AppNotifyDegradedPayload;
+  [IpcChannel.RealtimeMintError]: RealtimeMintErrorPayload;
 }
 
 /** Invoke-style channels (request → ack). */
@@ -593,6 +658,16 @@ export interface IpcInvokeMap {
   [IpcChannel.RealtimeRotationRequest]: {
     request: RealtimeRotationRequestPayload;
     response: RealtimeRotationResponse;
+  };
+  // § renderer-wireup (gap 8)
+  [IpcChannel.AppOnboardingComplete]: {
+    request: AppOnboardingCompletePayload;
+    response: AppOnboardingCompleteResponse;
+  };
+  // § renderer-wireup (gap 6)
+  [IpcChannel.SessionResume]: {
+    request: SessionResumePayload;
+    response: SessionResumeResponse;
   };
 }
 
@@ -655,6 +730,71 @@ export interface StateSnapshotPushPayload {
    *  have to reach into the snapshot shape. Mirrors `snapshot.goal`. */
   goal: string | null;
 }
+
+// ─── § renderer-wireup payloads (gaps 1/2/6/8/9/10/11) ──────────────────
+// These connect the prior P5/P6 primitives into live call paths. The strip
+// renderer drives the Canvas window (degradation cards + resume picker) via
+// `strip.canvas.render` (relayed to the Canvas window by main) and learns
+// of user interactions via the `canvas.user_response.relay` event.
+
+/** Mirror of CanvasRenderPayload kept here so the strip preload can type the
+ *  relay without importing canvas-ipc.ts. Fields match 1:1. */
+export interface StripCanvasRenderPayload {
+  component: string;
+  props: Record<string, unknown>;
+  component_id?: string;
+  call_id?: string;
+  autoDismissMs?: number;
+}
+
+/** Mirror of CanvasUserResponsePayload relayed to the strip renderer. */
+export interface CanvasUserResponseRelayPayload {
+  component_id: string;
+  value: unknown;
+  call_id?: string;
+}
+
+/** gap 8 — onboarding persistence. Written to meta.json + harness.json + .env. */
+export interface AppOnboardingCompletePayload {
+  projectPath?: string | null;
+  voice?: 'marin' | 'cedar' | string | null;
+  apiKey?: string | null;
+}
+
+export type AppOnboardingCompleteResponse =
+  | { ok: true; sessionDir: string | null }
+  | { ok: false; error: string };
+
+/** gap 9 — strip movable toggle while the Canvas is open. */
+export interface WindowSetStripMovablePayload {
+  movable: boolean;
+}
+
+/** gap 2 — persistent-degraded notification + tray indicator request. */
+export interface AppNotifyDegradedPayload {
+  /** ms since the outage started; used for the notification copy. */
+  outageMs: number;
+  /** Failed reconnect attempts so far. */
+  attempt: number;
+}
+
+/** gap 11 — token mint failed (e.g. HTTP 401). */
+export interface RealtimeMintErrorPayload {
+  /** HTTP status when known (401 = auth), 0 otherwise. */
+  status: number;
+  message: string;
+}
+
+/** gap 6 — resume picker resolution. */
+export interface SessionResumePayload {
+  choice: 'resume' | 'fresh';
+  /** The session dir slug to resume (from the resume preview). */
+  sessionId?: string | null;
+}
+
+export type SessionResumeResponse =
+  | { ok: true; choice: 'resume' | 'fresh'; sessionId: string | null; goal: string | null }
+  | { ok: false; error: string };
 
 
 // ─── Re-export state types so callers only need this import ──────────────

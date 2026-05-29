@@ -29,7 +29,7 @@
 
 import { useEffect, useRef } from 'react';
 import type { RealtimeClient } from '../realtime/client.js';
-import { commands, useStore } from '../state/store.js';
+import { commands } from '../state/store.js';
 
 const ONBOARDING_KEY = 'director.onboarded.v1';
 const COMPONENT_ID = 'director-onboarding';
@@ -96,28 +96,52 @@ function trySpeak(client: RealtimeClient): void {
   client.send({ type: 'response.create' });
 }
 
+// ─── § renderer-wireup (gap 8) ──────────────────────────────────────────
+// Persist the real form values (projectPath, voice, apiKey) to the side
+// store + .env via the main-process `app.onboardingComplete` handler.
 function sendOnboardingComplete(values: OnboardingValues): void {
   if (typeof window === 'undefined') return;
   const bridge = window.director;
-  if (!bridge?.tool?.call) return;
-  // Best-effort: surface the onboarding values to main as a synthetic tool
-  // call. Main (W3) will recognize the name when wired; until then it
-  // returns the stub `ok:true` and we move on.
-  void bridge.tool
-    .call({
-      callId: `onboarding-${Date.now()}`,
-      name: 'update_harness',
-      args: {
-        kind: 'onboarding',
-        projectPath: values.projectPath ?? null,
-        voice: values.voice ?? 'marin',
-        apiKeyProvided: typeof values.apiKey === 'string' && values.apiKey.length > 0,
-      },
-      realtimeItemId: 'onboarding',
+  if (!bridge?.app?.onboardingComplete) {
+    console.warn('[useOnboarding] bridge.app.onboardingComplete not exposed');
+    return;
+  }
+  void bridge.app
+    .onboardingComplete({
+      projectPath: values.projectPath ?? null,
+      voice: values.voice ?? 'marin',
+      apiKey: values.apiKey ?? null,
+    })
+    .then((res) => {
+      if (!res.ok) {
+        console.warn('[useOnboarding] onboardingComplete failed', res.error);
+      } else {
+        console.log('[useOnboarding] onboarding persisted →', res.sessionDir);
+      }
     })
     .catch((err) => {
-      console.warn('[useOnboarding] tool.call(update_harness) failed', err);
+      console.warn('[useOnboarding] app.onboardingComplete threw', err);
     });
+}
+
+/** Extract typed form values from a Canvas form user_response payload. The
+ *  Form component emits `{ value: { values: { ... } } }`. */
+function extractFormValues(value: unknown): OnboardingValues {
+  const outer =
+    typeof value === 'object' && value !== null
+      ? (value as Record<string, unknown>)
+      : {};
+  const inner =
+    typeof outer.values === 'object' && outer.values !== null
+      ? (outer.values as Record<string, unknown>)
+      : outer;
+  const str = (v: unknown): string | undefined =>
+    typeof v === 'string' && v.length > 0 ? v : undefined;
+  return {
+    projectPath: str(inner.projectPath),
+    voice: str(inner.voice),
+    apiKey: str(inner.apiKey),
+  };
 }
 
 export function useOnboarding(client: RealtimeClient): void {
@@ -128,47 +152,40 @@ export function useOnboarding(client: RealtimeClient): void {
     if (!shouldShowOnboarding()) return;
     fired.current = true;
 
-    commands.openCanvas({
+    const formArgs = {
       componentId: COMPONENT_ID,
-      component: 'form',
+      component: 'form' as const,
       props: {
         title: 'Welcome to Director',
         submitLabel: 'Start',
       },
       interactive: true,
+    };
+    // Local store (drives strip-side canvas selectors).
+    commands.openCanvas(formArgs);
+    // ─── § renderer-wireup (gap 8) ──────────────────────────────────────
+    // Also surface the form in the real Canvas BrowserWindow via the relay.
+    window.director?.canvas?.render({
+      component: formArgs.component,
+      props: formArgs.props,
+      component_id: formArgs.componentId,
     });
   }, []);
 
-  // Wait for the Canvas response — submitCanvasResponse fires on submit.
-  // The store's `canvas` already routes the value through the queue; we
-  // need to intercept the submission. The simplest renderer-only path:
-  // observe `canvas.phase === 'open'` after a previously interactive form
-  // closes with the onboarding componentId.
+  // ─── § renderer-wireup (gap 8) — read real form values from the Canvas ──
+  // The Canvas window's Form emits `canvas.user_response` with the submitted
+  // values; main relays it here. We extract { projectPath, voice, apiKey },
+  // persist via app.onboardingComplete, mark onboarded, and greet.
   useEffect(() => {
-    if (!fired.current && !shouldShowOnboarding()) return;
-    const unsub = useStore.subscribe((state, prev) => {
-      // Detect transition: was awaiting our onboarding response, now closed.
-      const wasOurs =
-        prev.canvas.componentId === COMPONENT_ID &&
-        prev.canvas.phase === 'awaiting-response';
-      const isClosing =
-        state.canvas.phase === 'open' ||
-        state.canvas.phase === 'dismissing' ||
-        state.canvas.phase === 'hidden';
-      if (wasOurs && isClosing) {
-        // Best we have to read the submitted values at the moment of close:
-        // the canvas props still hold the form definition, NOT the answer.
-        // The answer flows through the Canvas IPC user_response which lives
-        // in canvas-window only. For now we accept that the form's onSubmit
-        // was wired through CanvasApp; that fires a `canvas.user_response`
-        // back to main, and main is responsible for persisting the values.
-        // Renderer-side we just mark onboarded + greet so the user is
-        // unblocked.
-        markOnboarded();
-        sendOnboardingComplete({});
-        speakGreeting(client);
-      }
+    const bridge = window.director;
+    if (!bridge?.canvas?.onUserResponse) return;
+    const off = bridge.canvas.onUserResponse((payload) => {
+      if (payload.component_id !== COMPONENT_ID) return;
+      const values = extractFormValues(payload.value);
+      markOnboarded();
+      sendOnboardingComplete(values);
+      speakGreeting(client);
     });
-    return unsub;
+    return off;
   }, [client]);
 }

@@ -899,6 +899,41 @@ export async function findResumableSession(opts?: {
   return best;
 }
 
+// ─── § renderer-wireup (gap 6) — resume hydration ────────────────────────
+// Re-point the in-memory session pointer at an existing on-disk session so
+// subsequent planner / persistence reads target the resumed dir. The boot
+// path already called `initSession()` (minting a fresh slug); resuming
+// swaps that pointer to the chosen session id. Returns the resumed dir +
+// the snapshot's last goal (for the planner's first consult instructions,
+// which it rebuilds from the side store on every call — we don't touch the
+// planner internals here, just the on-disk source it reads from).
+export async function hydrateExistingSession(
+  resumeSessionId: string,
+): Promise<{ dir: string; goal: string | null }> {
+  const dir = join(homedir(), '.director', 'sessions', resumeSessionId);
+  // Verify the dir exists before swapping the pointer.
+  await fs.stat(dir); // throws ENOENT if missing — caller catches.
+  sessionId = resumeSessionId;
+  sessionDir = dir;
+  const meta = await readMeta(dir);
+  const snapshot = await readSnapshot(dir);
+  const goal =
+    meta?.currentGoal ??
+    (snapshot &&
+    typeof snapshot.store === 'object' &&
+    snapshot.store !== null &&
+    'goal' in snapshot.store
+      ? ((snapshot.store as { goal?: string | null }).goal ?? null)
+      : null);
+  // Touch updatedAt so the resumed session sorts to the front next time.
+  try {
+    await writeMeta({});
+  } catch (err) {
+    console.warn('[side-store] hydrateExistingSession writeMeta touch failed', err);
+  }
+  return { dir, goal };
+}
+
 /** Test-only: drop the in-memory snapshot debounce so a new test can
  *  start clean. Mirrors `_resetSessionForTests()` semantics. */
 export function _resetSnapshotForTests(): void {

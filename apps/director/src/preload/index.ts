@@ -23,6 +23,15 @@ import {
   type RealtimeRotationResponse,
   type SessionResumeAvailablePayload,
   type StateSnapshotPushPayload,
+  type StripCanvasRenderPayload,
+  type CanvasUserResponseRelayPayload,
+  type AppOnboardingCompletePayload,
+  type AppOnboardingCompleteResponse,
+  type AppNotifyDegradedPayload,
+  type WindowSetStripMovablePayload,
+  type RealtimeMintErrorPayload,
+  type SessionResumePayload,
+  type SessionResumeResponse,
 } from '../shared/ipc.js';
 import type { CodexEvent } from '../shared/codex.js';
 import type {
@@ -132,6 +141,10 @@ const api: DirectorBridge = {
           listener,
         );
     },
+    // ─── § renderer-wireup (gap 6) ──────────────────────────────────────
+    resume(payload: SessionResumePayload): Promise<SessionResumeResponse> {
+      return ipcRenderer.invoke(IpcChannel.SessionResume, payload);
+    },
   },
   // ─── § persistence-wiring (gap 5) ──────────────────────────────────────
   persistence: {
@@ -142,6 +155,62 @@ const api: DirectorBridge = {
         // Best-effort: a failed persist push must never crash the renderer.
         console.warn('[preload] persistence.pushSnapshot failed', err);
       }
+    },
+  },
+  // ─── § renderer-wireup (gaps 1/2/6/8/9/10/11) ──────────────────────────
+  canvas: {
+    render(payload: StripCanvasRenderPayload): void {
+      try {
+        ipcRenderer.send(IpcChannel.StripCanvasRender, payload);
+      } catch (err) {
+        console.warn('[preload] canvas.render relay failed', err);
+      }
+    },
+    onUserResponse(cb) {
+      const listener = (
+        _evt: unknown,
+        payload: CanvasUserResponseRelayPayload,
+      ): void => cb(payload);
+      ipcRenderer.on(IpcChannel.CanvasUserResponseRelay, listener);
+      return () =>
+        ipcRenderer.removeListener(
+          IpcChannel.CanvasUserResponseRelay,
+          listener,
+        );
+    },
+  },
+  app: {
+    onboardingComplete(
+      payload: AppOnboardingCompletePayload,
+    ): Promise<AppOnboardingCompleteResponse> {
+      return ipcRenderer.invoke(IpcChannel.AppOnboardingComplete, payload);
+    },
+    notifyDegraded(payload: AppNotifyDegradedPayload): void {
+      try {
+        ipcRenderer.send(IpcChannel.AppNotifyDegraded, payload);
+      } catch (err) {
+        console.warn('[preload] app.notifyDegraded failed', err);
+      }
+    },
+  },
+  windowControl: {
+    setStripMovable(payload: WindowSetStripMovablePayload): void {
+      try {
+        ipcRenderer.send(IpcChannel.WindowSetStripMovable, payload);
+      } catch (err) {
+        console.warn('[preload] windowControl.setStripMovable failed', err);
+      }
+    },
+  },
+  realtimeErrors: {
+    onMintError(cb) {
+      const listener = (
+        _evt: unknown,
+        payload: RealtimeMintErrorPayload,
+      ): void => cb(payload);
+      ipcRenderer.on(IpcChannel.RealtimeMintError, listener);
+      return () =>
+        ipcRenderer.removeListener(IpcChannel.RealtimeMintError, listener);
     },
   },
 };

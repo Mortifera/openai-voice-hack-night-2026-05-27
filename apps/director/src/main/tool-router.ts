@@ -43,6 +43,14 @@ import {
 // § P6.4 hang-watchdog — see EOF marker for wiring.
 import { announceAgentHang } from './planner.js';
 import { setHangAnnouncer } from './codex-pool-core.js';
+// ─── § renderer-wireup (gap 8) — onboarding persistence ──────────────────
+import { basename } from 'node:path';
+import { writeMeta, getSessionDir } from './side-store.js';
+import { writeEnvKey } from './env-writer.js';
+import type {
+  AppOnboardingCompletePayload,
+  AppOnboardingCompleteResponse,
+} from '../shared/ipc.js';
 
 const ASK_TIMEOUT_MS = 60_000;
 
@@ -468,6 +476,9 @@ export function registerToolRouterIpc(stripWindow: BrowserWindow): void {
   // Wired here (not in codex-pool wrapper) because the tool router is
   // the natural seam between the codex layer and the planner layer.
   wireHangAnnouncer();
+
+  // § renderer-wireup (gap 8) — onboarding persistence handler.
+  registerOnboardingIpc();
 }
 
 // ─── § P6.4 hang-watchdog wiring (Main) ────────────────────────────────
@@ -521,4 +532,104 @@ export function _unwireHangAnnouncerForTests(): void {
     }
     hangAnnouncerCleanup = null;
   }
+}
+
+// ─── § renderer-wireup (gap 8) — onboarding persistence ──────────────────
+// The renderer's `useOnboarding` form (P5.3) collects { projectPath, voice,
+// apiKey }. On submit the strip relays `app.onboardingComplete` here; we:
+//   1. writeMeta({ projectPath, name }) so the resume scanner has a header
+//      and `meta.json:initialized` is implicitly true once projectPath set.
+//   2. seed harness.json with the canonical agent-identity roster (a single
+//      `system`-source HarnessRule documenting the four agents) so the
+//      planner's first consult can reference them by name.
+//   3. forward apiKey → W5's `writeEnvKey` (atomic .env merge + live env).
+// Defensive: each step is independently try/caught; a failure in one does
+// not abort the others. Returns the session dir so the renderer can log it.
+
+/** Canonical four-agent roster seeded into harness.json on first launch. */
+const AGENT_IDENTITY_ROSTER =
+  'Agent roster: Maya (Frontend), Jin (Backend), Cleo (Data), Wren (Design).';
+
+let onboardingIpcRegistered = false;
+
+export async function handleOnboardingComplete(
+  payload: AppOnboardingCompletePayload,
+): Promise<AppOnboardingCompleteResponse> {
+  const projectPath =
+    typeof payload?.projectPath === 'string' && payload.projectPath.length > 0
+      ? payload.projectPath
+      : null;
+  const apiKey =
+    typeof payload?.apiKey === 'string' && payload.apiKey.length > 0
+      ? payload.apiKey
+      : null;
+
+  // 1. meta.json — project root + friendly name.
+  try {
+    await writeMeta({
+      projectPath,
+      name: projectPath ? basename(projectPath) : null,
+    });
+  } catch (err) {
+    console.warn('[tool-router] onboarding writeMeta failed', err);
+  }
+
+  // 2. harness.json — seed the agent identity roster once.
+  try {
+    await appendHarnessRule({
+      id: `onboarding-roster-${Date.now()}`,
+      rule: AGENT_IDENTITY_ROSTER,
+      why: 'Seeded at onboarding so the planner can dispatch agents by name.',
+      timestamp: Date.now(),
+      scope: 'global',
+      source: 'system',
+    });
+  } catch (err) {
+    console.warn('[tool-router] onboarding harness seed failed', err);
+  }
+
+  // 3. apiKey → .env via W5's atomic writer.
+  if (apiKey) {
+    try {
+      const res = await writeEnvKey({ key: 'OPENAI_API_KEY', value: apiKey });
+      if (!res.ok) {
+        console.warn('[tool-router] onboarding writeEnvKey rejected', res.error);
+      }
+    } catch (err) {
+      console.warn('[tool-router] onboarding writeEnvKey threw', err);
+    }
+  }
+
+  return { ok: true, sessionDir: getSessionDir() };
+}
+
+function registerOnboardingIpc(): void {
+  if (onboardingIpcRegistered) {
+    try {
+      ipcMain.removeHandler(IpcChannel.AppOnboardingComplete);
+    } catch {
+      /* no existing handler */
+    }
+  }
+  onboardingIpcRegistered = true;
+  ipcMain.handle(
+    IpcChannel.AppOnboardingComplete,
+    async (
+      _evt,
+      payload: AppOnboardingCompletePayload,
+    ): Promise<AppOnboardingCompleteResponse> => {
+      console.log('[tool-router] app.onboardingComplete', {
+        projectPath: payload?.projectPath ?? null,
+        voice: payload?.voice ?? null,
+        apiKeyProvided:
+          typeof payload?.apiKey === 'string' && payload.apiKey.length > 0,
+      });
+      try {
+        return await handleOnboardingComplete(payload);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { ok: false, error: message };
+      }
+    },
+  );
 }

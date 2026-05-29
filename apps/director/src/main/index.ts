@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, Menu, screen, Tray, nativeImage } from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain, Menu, Notification, screen, Tray, nativeImage } from 'electron';
 import { electronApp, optimizer, is } from '@electron-toolkit/utils';
 import { config as loadDotenv } from 'dotenv';
 import { join, resolve } from 'node:path';
@@ -49,6 +49,23 @@ import {
   registerSnapshotPushIpc,
   writeSessionInitMeta,
 } from './side-store.js';
+// ─── § renderer-wireup (gap 6) — resume hydration ───────────────────────
+import { hydrateExistingSession, getSessionId } from './side-store.js';
+import type {
+  SessionResumePayload,
+  SessionResumeResponse,
+} from '../shared/ipc.js';
+// ─── § renderer-wireup (gaps 2/6/9/10/11) ───────────────────────────────
+import {
+  CanvasIpcChannel,
+  type CanvasUserResponsePayload,
+} from '../shared/canvas-ipc.js';
+import type {
+  StripCanvasRenderPayload,
+  CanvasUserResponseRelayPayload,
+  WindowSetStripMovablePayload,
+  AppNotifyDegradedPayload,
+} from '../shared/ipc.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
@@ -192,6 +209,20 @@ function createTray(): void {
   tray.setContextMenu(buildTrayMenu());
 }
 
+// ─── § renderer-wireup (gap 2) — tray degraded indicator ─────────────────
+// Flip the tray glyph red-dot while the realtime client is persistently
+// degraded (after the reconnect FSM exhausts its retries). Restores the
+// neutral bullet on recovery. No-op if the tray hasn't been created yet.
+function setTrayDegraded(degraded: boolean): void {
+  if (!tray || tray.isDestroyed()) return;
+  try {
+    tray.setTitle(degraded ? '🔴' : '●');
+    tray.setToolTip(degraded ? 'Director — offline, reconnecting…' : 'Director');
+  } catch (err) {
+    console.warn('[director] setTrayDegraded failed', err);
+  }
+}
+
 function registerGlobalHotkey(): void {
   const accelerator = 'CommandOrControl+Shift+Space';
   const ok = globalShortcut.register(accelerator, () => {
@@ -316,12 +347,30 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(
     IpcChannel.RealtimeMintToken,
-    async (_evt, req: RealtimeSessionRequest = {}): Promise<RealtimeEphemeralToken> => {
-      const token = await mintEphemeralToken(req);
-      console.log(
-        `[director] minted realtime token model=${token.model} expires_at=${token.expiresAt}`,
-      );
-      return token;
+    async (evt, req: RealtimeSessionRequest = {}): Promise<RealtimeEphemeralToken> => {
+      try {
+        const token = await mintEphemeralToken(req);
+        console.log(
+          `[director] minted realtime token model=${token.model} expires_at=${token.expiresAt}`,
+        );
+        return token;
+      } catch (err) {
+        // ─── § renderer-wireup (gap 11) ─────────────────────────────────
+        // Surface auth / mint failures back to the strip renderer so it can
+        // open the api_key_missing card. We parse the HTTP status out of the
+        // mint error message ("HTTP 401 — …") and special-case 401 + the
+        // "OPENAI_API_KEY is not set" guard as auth (status 401).
+        const message = err instanceof Error ? err.message : String(err);
+        const httpMatch = /HTTP (\d{3})/.exec(message);
+        const missingKey = message.includes('OPENAI_API_KEY is not set');
+        const status = missingKey ? 401 : httpMatch ? Number(httpMatch[1]) : 0;
+        try {
+          evt.sender.send(IpcChannel.RealtimeMintError, { status, message });
+        } catch (sendErr) {
+          console.warn('[director] realtime.mintError send failed', sendErr);
+        }
+        throw err;
+      }
     },
   );
 
@@ -421,7 +470,15 @@ function registerIpcHandlers(): void {
       console.log(
         `[director] reconnect state=${payload.state} attempt=${payload.attempt} outageMs=${payload.outageMs}`,
       );
-      // Future: tray icon red dot, macOS notification at 30s.
+      // ─── § renderer-wireup (gap 2) ─────────────────────────────────────
+      // Flip the tray red dot while degraded / persistently-offline; clear
+      // it once the FSM reports 'live'. The macOS notification is handled
+      // separately via `app.notifyDegraded` so it fires exactly once.
+      setTrayDegraded(
+        payload.state === 'degraded' ||
+          payload.state === 'retrying' ||
+          payload.state === 'offline-persistent',
+      );
     },
   );
 
@@ -449,6 +506,124 @@ function registerIpcHandlers(): void {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.warn('[director] app.writeEnv threw', message);
+        return { ok: false, error: message };
+      }
+    },
+  );
+
+  // ─── § renderer-wireup (gaps 2/6/9/10/11) ────────────────────────────
+  // The strip renderer can't reach the Canvas BrowserWindow directly — its
+  // `commands.openCanvas` only mutates the strip's local store. These
+  // handlers bridge the gap so the strip can (a) drive the Canvas window
+  // for degradation cards + the resume picker, (b) learn when the user
+  // interacts with a Canvas card, (c) toggle the Strip window movable while
+  // the Canvas is open, and (d) surface the persistent-degraded notification.
+
+  // (a) strip.canvas.render → forward to the Canvas window.
+  ipcMain.on(
+    IpcChannel.StripCanvasRender,
+    (_evt, payload: StripCanvasRenderPayload) => {
+      if (!payload || typeof payload.component !== 'string') {
+        console.warn('[director] strip.canvas.render bad payload', payload);
+        return;
+      }
+      try {
+        renderCanvas({
+          component: payload.component,
+          props: payload.props ?? {},
+          component_id: payload.component_id,
+          call_id: payload.call_id,
+          autoDismissMs: payload.autoDismissMs,
+        });
+      } catch (err) {
+        console.warn('[director] strip.canvas.render failed', err);
+      }
+    },
+  );
+
+  // (b) canvas.user_response → relay to the strip window so the resume
+  // picker + onboarding can resolve. The Canvas window sends this; main's
+  // canvas.ts + tool-router already log it. ipcMain.on supports multiple
+  // listeners, so this relay coexists with those.
+  ipcMain.on(
+    CanvasIpcChannel.UserResponse,
+    (_evt, payload: CanvasUserResponsePayload) => {
+      if (!payload || typeof payload.component_id !== 'string') return;
+      const relay: CanvasUserResponseRelayPayload = {
+        component_id: payload.component_id,
+        value: payload.value,
+        call_id: payload.call_id,
+      };
+      const target = stripWindow;
+      if (!target || target.isDestroyed()) return;
+      try {
+        target.webContents.send(IpcChannel.CanvasUserResponseRelay, relay);
+      } catch (err) {
+        console.warn('[director] canvas.user_response relay failed', err);
+      }
+    },
+  );
+
+  // (c) window.setStripMovable → toggle the Strip window movable flag.
+  ipcMain.on(
+    IpcChannel.WindowSetStripMovable,
+    (_evt, payload: WindowSetStripMovablePayload) => {
+      if (!stripWindow || stripWindow.isDestroyed()) return;
+      try {
+        stripWindow.setMovable(payload?.movable === true);
+      } catch (err) {
+        console.warn('[director] window.setStripMovable failed', err);
+      }
+    },
+  );
+
+  // (d) app.notifyDegraded → single macOS notification (fired once by the
+  // renderer FSM at persistent-degraded) + ensure the tray dot is red.
+  ipcMain.on(
+    IpcChannel.AppNotifyDegraded,
+    (_evt, payload: AppNotifyDegradedPayload) => {
+      setTrayDegraded(true);
+      try {
+        if (Notification.isSupported()) {
+          const seconds = Math.round((payload?.outageMs ?? 0) / 1000);
+          new Notification({
+            title: 'Director offline',
+            body:
+              seconds > 0
+                ? `Reconnecting… (offline ${seconds}s). Use the chat fallback if needed.`
+                : 'Reconnecting… Use the chat fallback if needed.',
+            silent: false,
+          }).show();
+        }
+      } catch (err) {
+        console.warn('[director] app.notifyDegraded notification failed', err);
+      }
+    },
+  );
+
+  // ─── § renderer-wireup (gap 6) — resume picker resolution ────────────
+  // The strip renderer's resume-picker subscriber calls this when the user
+  // picks Resume / Start fresh. Resume re-points the side store at the prior
+  // session dir (planner reads instructions from disk every consult, so the
+  // pointer swap IS the hydration); Start fresh keeps the boot-minted dir.
+  ipcMain.handle(
+    IpcChannel.SessionResume,
+    async (_evt, payload: SessionResumePayload): Promise<SessionResumeResponse> => {
+      try {
+        if (payload?.choice === 'resume' && payload.sessionId) {
+          const { goal } = await hydrateExistingSession(payload.sessionId);
+          console.log(
+            `[director] session.resume → hydrated id=${payload.sessionId} goal=${goal ?? '(none)'}`,
+          );
+          return { ok: true, choice: 'resume', sessionId: payload.sessionId, goal };
+        }
+        // Start fresh — the boot-minted session is already active. Just ack.
+        const fresh = getSessionId();
+        console.log(`[director] session.resume → start fresh id=${fresh ?? '(pending)'}`);
+        return { ok: true, choice: 'fresh', sessionId: fresh, goal: null };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn('[director] session.resume failed', message);
         return { ok: false, error: message };
       }
     },

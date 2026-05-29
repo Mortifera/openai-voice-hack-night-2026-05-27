@@ -100,6 +100,25 @@ export class RealtimeClient {
   /** Auto-reconnect can be disabled by callers (tests, manual close). */
   private autoReconnect = true;
 
+  // ─── § renderer-wireup (gaps 1 + 2) ────────────────────────────────────
+  /** T+55 rotation timer. Set by `enableRotationTimer()`, cleared on close. */
+  private rotationTimer: ReturnType<typeof setInterval> | null = null;
+  /** Wall-clock when the current session connected (for the rotation clock). */
+  private sessionStartedAt: number | null = null;
+  /** Caller hook fired once when the reconnect FSM goes persistently
+   *  degraded (after the configured retry budget). App uses this to surface
+   *  the macOS notification + tray dot + rotation/degraded Canvas card. */
+  private onPersistentDegraded: ((info: { outageMs: number; attempt: number }) => void) | null =
+    null;
+  /** Guard so the persistent-degraded hook fires exactly once per outage. */
+  private persistentDegradedNotified = false;
+  /** Caller hook fired when getUserMedia is denied (NotAllowedError). App
+   *  surfaces the mic_denied Canvas card + a voice apology. */
+  private onMicDenied: (() => void) | null = null;
+  /** Caller hook fired when a T+55 rotation fails (mint / SDP / brief).
+   *  App surfaces the rotation_failed Canvas card. */
+  private onRotationFailed: (() => void) | null = null;
+
   get status(): RealtimeClientStatus {
     return this._status;
   }
@@ -205,6 +224,36 @@ export class RealtimeClient {
     if (type === 'input_audio_buffer.speech_started') {
       this.send({ type: 'response.cancel' });
     }
+
+    // ─── § renderer-wireup (gap 2) — pendingUtterance producer ──────────
+    // Seed the replay buffer from the live transcription so an in-flight
+    // utterance survives a mid-VAD disconnect. We capture the partial
+    // (`.delta`) text and finalize on `.completed`. On reconnect,
+    // `onConnectionRecovered()` replays whatever's buffered. We clear the
+    // buffer once the user's turn is committed (completed transcription).
+    if (
+      type === 'conversation.item.input_audio_transcription.delta' ||
+      type === 'conversation.item.input_audio_transcription.partial'
+    ) {
+      const delta = (parsed.delta ?? parsed.transcript) as string | undefined;
+      if (typeof delta === 'string' && delta.length > 0) {
+        // Deltas are incremental; accumulate so the replay text is complete.
+        this.setPendingUtterance((this.pendingUtterance ?? '') + delta);
+      }
+    }
+    if (type === 'conversation.item.input_audio_transcription.completed') {
+      const transcript = parsed.transcript as string | undefined;
+      // Keep the finalized text buffered until the model has responded — if
+      // the channel drops between commit and response, we still replay it.
+      if (typeof transcript === 'string' && transcript.length > 0) {
+        this.setPendingUtterance(transcript);
+      }
+    }
+    // Once the model's response completes, the user's turn was delivered —
+    // drop the buffer so we don't double-replay an already-answered turn.
+    if (type === 'response.done') {
+      this.setPendingUtterance(null);
+    }
   }
 
   /**
@@ -274,7 +323,23 @@ export class RealtimeClient {
       // 2. Mic capture. Default mode 'tap-open' — the first hotkey press
       // that triggered connect IS the user's open-mic gesture.
       this.setStatus('getting-mic');
-      this.micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      try {
+        this.micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (micErr) {
+        // ─── § renderer-wireup (gap 10) — mic permission denied ──────────
+        // macOS privacy gate rejects with NotAllowedError / PermissionDenied.
+        // Fire the mic-denied hook so App can open the mic_denied Canvas card
+        // + play a voice apology, then rethrow so connect() unwinds cleanly.
+        const name = (micErr as { name?: string })?.name ?? '';
+        if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+          try {
+            this.onMicDenied?.();
+          } catch (hookErr) {
+            console.warn('[realtime] onMicDenied hook threw', hookErr);
+          }
+        }
+        throw micErr;
+      }
       this.emitStreams();
       // Force the event to fire so subscribers see the initial mode.
       this._micMode = 'muted';
@@ -463,6 +528,7 @@ export class RealtimeClient {
     // Manual close → disable auto-reconnect so we don't fight the user.
     this.autoReconnect = false;
     this.clearReconnectTimer();
+    this.clearRotationTimer(); // § renderer-wireup (gap 1)
     this.teardownRotationPeer('manual close');
     try {
       this.dc?.close();
@@ -515,6 +581,87 @@ export class RealtimeClient {
    */
   setPendingUtterance(text: string | null): void {
     this.pendingUtterance = text && text.trim().length > 0 ? text.trim() : null;
+  }
+
+  // ─── § renderer-wireup (gaps 1 + 2 + 10) — caller hooks + rotation clock ─
+
+  /**
+   * Register caller hooks for UX surfaces the client can't reach itself:
+   *  - `onMicDenied`: getUserMedia NotAllowedError → open mic_denied card.
+   *  - `onPersistentDegraded`: reconnect retries exhausted → notification +
+   *    tray dot + degraded Canvas card. Fires once per outage.
+   *  - `onRotationFailed`: a T+55 rotation attempt failed → rotation_failed.
+   * All hooks are optional; passing undefined leaves the prior hook intact.
+   */
+  setUxHooks(hooks: {
+    onMicDenied?: () => void;
+    onPersistentDegraded?: (info: { outageMs: number; attempt: number }) => void;
+    onRotationFailed?: () => void;
+  }): void {
+    if (hooks.onMicDenied !== undefined) this.onMicDenied = hooks.onMicDenied;
+    if (hooks.onPersistentDegraded !== undefined)
+      this.onPersistentDegraded = hooks.onPersistentDegraded;
+    if (hooks.onRotationFailed !== undefined)
+      this.onRotationFailed = hooks.onRotationFailed;
+  }
+
+  /**
+   * Default rotation interval — T+55:00 (5 min before the 60-min Realtime
+   * session cap). Overridable via `DIRECTOR_ROTATION_MS` (import.meta.env)
+   * so tests / QA can force a fast rotation.
+   */
+  private rotationDueMs(): number {
+    const meta = (import.meta as { env?: Record<string, string> }).env;
+    const raw = meta?.DIRECTOR_ROTATION_MS;
+    const parsed = raw != null ? Number(raw) : NaN;
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    return 55 * 60 * 1000;
+  }
+
+  /**
+   * gap 1 — start the T+55 rotation clock. App calls this once on the strip
+   * surface after the session connects. The interval checks elapsed wall
+   * time and fires `triggerRotation()` at the due point; a failed rotation
+   * invokes the `onRotationFailed` hook so App can surface the card.
+   * Idempotent: a second call clears + restarts the timer (used on swap).
+   */
+  enableRotationTimer(): void {
+    this.clearRotationTimer();
+    this.sessionStartedAt = Date.now();
+    const dueMs = this.rotationDueMs();
+    // Check on a coarse cadence (every 5s, or every dueMs/10 for fast test
+    // intervals) so we don't busy-loop but still fire close to the due time.
+    const checkEvery = Math.max(250, Math.min(5_000, Math.floor(dueMs / 10)));
+    this.rotationTimer = setInterval(() => {
+      if (this.sessionStartedAt == null) return;
+      if (this._status !== 'connected') return;
+      if (this.rotationInFlight) return;
+      if (Date.now() - this.sessionStartedAt < dueMs) return;
+      // Reset the clock immediately so a long-running rotation doesn't
+      // double-trigger on the next tick.
+      this.sessionStartedAt = Date.now();
+      void this.triggerRotation().then((ok) => {
+        if (!ok) {
+          try {
+            this.onRotationFailed?.();
+          } catch (err) {
+            console.warn('[realtime] onRotationFailed hook threw', err);
+          }
+        }
+      });
+    }, checkEvery);
+  }
+
+  private clearRotationTimer(): void {
+    if (this.rotationTimer != null) {
+      clearInterval(this.rotationTimer);
+      this.rotationTimer = null;
+    }
+  }
+
+  /** Test-only — directly drive the mic-denied hook without getUserMedia. */
+  _injectMicDeniedForTest(): void {
+    this.onMicDenied?.();
   }
 
   /**
@@ -839,6 +986,9 @@ export class RealtimeClient {
     this.outageStartedAt = null;
     this.reconnectAttempt = 0;
     this.offlineNotificationSent = false;
+    // § renderer-wireup (gap 2): allow the persistent-degraded UX to fire
+    // again on the next distinct outage.
+    this.persistentDegradedNotified = false;
     this.clearReconnectTimer();
 
     this.reportReconnectState('live', undefined);
@@ -894,6 +1044,20 @@ export class RealtimeClient {
       this.reportReconnectState('degraded', err instanceof Error ? err.message : String(err));
       if (this.reconnectAttempt >= PERSISTENT_DEGRADED_AFTER_ATTEMPTS) {
         this.reportReconnectState('offline-persistent', undefined);
+        // ─── § renderer-wireup (gap 2) — persistent-degraded UX ──────────
+        // Fire the App hook exactly once per outage: macOS notification +
+        // tray dot + degraded Canvas card with the text-fallback surface.
+        if (!this.persistentDegradedNotified) {
+          this.persistentDegradedNotified = true;
+          try {
+            this.onPersistentDegraded?.({
+              outageMs: this.outageMs,
+              attempt: this.reconnectAttempt,
+            });
+          } catch (hookErr) {
+            console.warn('[realtime] onPersistentDegraded hook threw', hookErr);
+          }
+        }
       }
       if (
         !this.offlineNotificationSent &&

@@ -417,6 +417,10 @@ export function buildResumePicker(
   };
 }
 
+/** Last resume preview seen, so the canvas-response subscriber can map the
+ *  picker choice back to the session id to hydrate. */
+let pendingResumeSessionId: string | null = null;
+
 export function handleSessionResumeAvailable(
   payload: SessionResumeAvailablePayload,
 ): void {
@@ -431,6 +435,7 @@ export function handleSessionResumeAvailable(
     );
     return;
   }
+  pendingResumeSessionId = payload.sessionPreview.sessionId ?? null;
   const { question, canvasArgs } = buildResumePicker(payload.sessionPreview);
   try {
     commands.appendTranscript({
@@ -448,6 +453,63 @@ export function handleSessionResumeAvailable(
   } catch (err) {
     console.warn('[ipcSync] resume canvas openCanvas failed', err);
   }
+  // ─── § renderer-wireup (gap 6) ──────────────────────────────────────────
+  // The strip store's openCanvas only mutates local state — to actually
+  // surface the picker in the Canvas BrowserWindow we relay a canvas.render
+  // through main. The response comes back via `canvas.user_response.relay`
+  // (subscribed in initIpcSync → handleResumePickerResponse).
+  try {
+    window.director?.canvas?.render({
+      component: canvasArgs.component,
+      props: canvasArgs.props as Record<string, unknown>,
+      component_id: canvasArgs.componentId,
+    });
+  } catch (err) {
+    console.warn('[ipcSync] resume canvas relay failed', err);
+  }
+}
+
+// ─── § renderer-wireup (gap 6) — resume picker response ──────────────────
+// Handles the Canvas user_response for the resume picker. The options_picker
+// emits `{ value: { option_id } }` or `{ value: { concept_id } }` depending
+// on the component; we accept either and treat the literal ids "resume" /
+// "fresh" defined in `buildResumePicker`. On "resume" we IPC to main to
+// hydrate the prior session; on "fresh" we ack the boot-minted session.
+export function handleResumePickerResponse(payload: {
+  component_id: string;
+  value: unknown;
+}): void {
+  if (payload?.component_id !== RESUME_PICKER_COMPONENT_ID) return;
+  const value = payload.value;
+  const choiceId =
+    typeof value === 'object' && value !== null
+      ? ((value as Record<string, unknown>).option_id ??
+        (value as Record<string, unknown>).id ??
+        (value as Record<string, unknown>).concept_id ??
+        (value as Record<string, unknown>).action)
+      : value;
+  const choice = choiceId === 'resume' ? 'resume' : 'fresh';
+  const bridge = window.director;
+  if (!bridge?.session?.resume) {
+    console.warn('[ipcSync] bridge.session.resume not exposed — cannot hydrate');
+    return;
+  }
+  void bridge.session
+    .resume({ choice, sessionId: choice === 'resume' ? pendingResumeSessionId : null })
+    .then((res) => {
+      if (!res.ok) {
+        console.warn('[ipcSync] session.resume failed', res.error);
+        return;
+      }
+      if (res.choice === 'resume' && res.goal) {
+        commands.setGoal(res.goal);
+      }
+      console.log(`[ipcSync] session resolved choice=${res.choice}`);
+    })
+    .catch((err) => console.warn('[ipcSync] session.resume threw', err))
+    .finally(() => {
+      pendingResumeSessionId = null;
+    });
 }
 
 // ─── Public init ─────────────────────────────────────────────────────────
@@ -492,6 +554,22 @@ export function initIpcSync(): void {
   } else {
     console.warn(
       '[ipcSync] bridge.session.onResumeAvailable not exposed — resume picker disabled',
+    );
+  }
+
+  // ─── § renderer-wireup (gap 6) — canvas response router ─────────────────
+  // Relayed canvas user_responses from main. Routes the resume-picker
+  // response to its handler; other component responses fall through (the
+  // onboarding form is handled by useOnboarding's own subscriber).
+  if (bridge.canvas?.onUserResponse) {
+    unsubscribers.push(
+      bridge.canvas.onUserResponse((payload) => {
+        handleResumePickerResponse(payload);
+      }),
+    );
+  } else {
+    console.warn(
+      '[ipcSync] bridge.canvas.onUserResponse not exposed — resume picker response disabled',
     );
   }
 
