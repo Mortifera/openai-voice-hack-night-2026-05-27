@@ -18,6 +18,8 @@ export const RealtimeToolName = {
   AskUser: 'ask_user',
   UpdateHarness: 'update_harness',
   ConsultDirector: 'consult_director',
+  KillAgent: 'kill_agent',
+  ExtendAgent: 'extend_agent',
 } as const;
 export type RealtimeToolName = (typeof RealtimeToolName)[keyof typeof RealtimeToolName];
 
@@ -217,6 +219,45 @@ export function realtimeToolDefs(): Array<Record<string, unknown>> {
         additionalProperties: false,
       },
     },
+    // ─── § hang-resolution (P6.4 — watchdog kill/extend) ──────────────────
+    // When a Codex sub-agent produces no output for ~60s, the watchdog
+    // narrates "X seems stuck — kill or extend?". These two tools are how
+    // the user's spoken answer resolves that escalation. Without them the
+    // model has no way to act on a hang.
+    {
+      type: 'function',
+      name: RealtimeToolName.KillAgent,
+      description:
+        "Stop a stuck or unwanted sub-agent. Use when the user says to kill, stop, or abandon an agent (typically after the watchdog reports one is stuck). Archives the agent's work for later inspection.",
+      parameters: {
+        type: 'object',
+        properties: {
+          agent: {
+            type: 'string',
+            enum: ['maya', 'jin', 'cleo', 'wren'],
+            description: 'Which agent to kill. Maya=frontend, Jin=backend, Cleo=data, Wren=design.',
+          },
+        },
+        required: ['agent'],
+      },
+    },
+    {
+      type: 'function',
+      name: RealtimeToolName.ExtendAgent,
+      description:
+        "Give a stuck sub-agent more time instead of killing it. Use when the user says to wait, give it more time, or be patient after the watchdog reports an agent is stuck. Re-arms the watchdog with a longer timeout.",
+      parameters: {
+        type: 'object',
+        properties: {
+          agent: {
+            type: 'string',
+            enum: ['maya', 'jin', 'cleo', 'wren'],
+            description: 'Which agent to grant more time. Maya=frontend, Jin=backend, Cleo=data, Wren=design.',
+          },
+        },
+        required: ['agent'],
+      },
+    },
   ];
 }
 
@@ -278,6 +319,10 @@ export const DIRECTOR_INSTRUCTIONS = `You are Director — a calm, terse voice o
 - ask_user: prompt the user with a direct question, optionally with options. Use sparingly — only when you genuinely need a decision.
 - update_harness: save a permanent rule to the project harness. Use whenever the user states a preference, constraint, or correction that should bind future work ("no gradients ever", "use Tailwind not CSS-in-JS").
 - consult_director: ask the Director's deeper planner (gpt-5) for help with non-trivial questions. Returns { summary, decisions }.
+- kill_agent / extend_agent: resolve a stuck-agent escalation. When you've told the user an agent seems stuck and they answer, route their decision: "kill it" / "stop it" / "drop it" → kill_agent; "give it more time" / "wait" / "be patient" → extend_agent.
+
+# Handling a stuck-agent escalation
+When the system tells you a sub-agent has gone quiet (no output for a while), say it plainly and offer the choice in one line: "Maya seems stuck — kill it or give it more time?" Then route the user's answer to kill_agent or extend_agent. Don't editorialize; just surface and resolve.
 
 # When to consult the planner (consult_director)
 You handle conversational interactions and routing yourself. Call consult_director when the user asks something that needs deeper reasoning:
