@@ -32,6 +32,7 @@ import {
   type RealtimeMintErrorPayload,
   type SessionResumePayload,
   type SessionResumeResponse,
+  type PttSignalPayload,
 } from '../shared/ipc.js';
 import type { CodexEvent } from '../shared/codex.js';
 import type {
@@ -109,6 +110,24 @@ const api: DirectorBridge = {
       const listener = (_evt: unknown, event: CodexEvent): void => cb(event);
       ipcRenderer.on(IpcChannel.CodexEvent, listener);
       return () => ipcRenderer.removeListener(IpcChannel.CodexEvent, listener);
+    },
+  },
+  // ─── § push-to-talk (native global key listener) ───────────────────────
+  ptt: {
+    onDown(cb) {
+      const listener = (_evt: unknown, p: PttSignalPayload): void => cb(p);
+      ipcRenderer.on(IpcChannel.PttDown, listener);
+      return () => ipcRenderer.removeListener(IpcChannel.PttDown, listener);
+    },
+    onUp(cb) {
+      const listener = (_evt: unknown, p: PttSignalPayload): void => cb(p);
+      ipcRenderer.on(IpcChannel.PttUp, listener);
+      return () => ipcRenderer.removeListener(IpcChannel.PttUp, listener);
+    },
+    onLock(cb) {
+      const listener = (_evt: unknown, p: PttSignalPayload): void => cb(p);
+      ipcRenderer.on(IpcChannel.PttLock, listener);
+      return () => ipcRenderer.removeListener(IpcChannel.PttLock, listener);
     },
   },
   // ─── § realtime-rotation + reconnect (W2 — P6.1 + P6.2) ────────────────

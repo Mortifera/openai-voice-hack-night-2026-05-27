@@ -30,6 +30,8 @@ import { registerToolRouterIpc } from './tool-router.js';
 import { showChatDebugWindow } from './chat-debug-window.js';
 import { registerPlannerDevIpc, setCompactionClient } from './planner.js';
 import { registerCodexPoolIpc, abortAllAgents } from './codex-pool.js';
+// ─── § push-to-talk (native global key listener — uiohook-napi) ──────────
+import { startPttListener, stopPttListener } from './ptt-listener.js';
 import OpenAI from 'openai';
 // ─── § canvas-degradation (W5 — P6.6) ───────────────────────────────────
 import { writeEnvKey } from './env-writer.js';
@@ -675,6 +677,12 @@ app.whenReady().then(() => {
   registerPlannerDevIpc(stripWindow);
   registerCodexPoolIpc(stripWindow);
 
+  // ─── § push-to-talk (native global key listener) ────────────────────
+  // Hold ⌃⌥ to talk, double-tap to lock hands-free. Drives connect-on-
+  // demand + mic open/close in the strip renderer. Gracefully no-ops if
+  // the native listener can't start (e.g. Input Monitoring not granted).
+  startPttListener(stripWindow);
+
   // ─── § side-store bootstrap (W3 — gap 7) ────────────────────────────
   // Boot the on-disk session dir + register the snapshot IPC. Async +
   // idempotent (calls initSession internally); fire-and-forget so it
@@ -743,6 +751,7 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  stopPttListener(); // § push-to-talk — release the native global listener
 });
 
 app.on('before-quit', () => {

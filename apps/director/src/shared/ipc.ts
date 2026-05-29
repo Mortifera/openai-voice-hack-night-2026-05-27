@@ -146,6 +146,18 @@ export const IpcChannel = {
    *  the side store at the existing session + stages its snapshot; `fresh`
    *  keeps the boot-minted session. See gap 6. */
   SessionResume: 'session.resume',                     // renderer-wireup (gap 6)
+  // ─── § push-to-talk (native global key listener — uiohook-napi) ───────
+  // Electron's globalShortcut only sees key-DOWN, so true hold-to-talk needs
+  // a native global listener (main/ptt-listener.ts). It watches the ⌃⌥
+  // chord and emits these to the strip renderer, which drives connect /
+  // mic-open / mic-close + the hands-free lock. Wispr-Flow model: hold to
+  // talk, double-tap to lock hands-free.
+  /** Main → strip: PTT chord pressed (hold start) → connect + open mic. */
+  PttDown: 'ptt.down',
+  /** Main → strip: PTT chord released (hold end) → mute mic + arm teardown. */
+  PttUp: 'ptt.up',
+  /** Main → strip: PTT chord double-tapped → toggle hands-free lock. */
+  PttLock: 'ptt.lock',
 } as const;
 
 export type IpcChannel = (typeof IpcChannel)[keyof typeof IpcChannel];
@@ -513,6 +525,14 @@ export interface DirectorBridge {
   codex: {
     onEvent: (cb: (event: CodexEvent) => void) => () => void;
   };
+  // ─── § push-to-talk (native global key listener) ────────────────────
+  /** Hold ⌃⌥ to talk, double-tap to lock. Main's native listener emits
+   *  these; the strip renderer drives connect / mic open-close / lock. */
+  ptt: {
+    onDown: (cb: (p: PttSignalPayload) => void) => () => void;
+    onUp: (cb: (p: PttSignalPayload) => void) => () => void;
+    onLock: (cb: (p: PttSignalPayload) => void) => () => void;
+  };
   // ─── § realtime-rotation + reconnect (W2 — P6.1 + P6.2) ─────────────
   /** Realtime rotation + reconnect bridge. Renderer drives the lifecycle
    *  FSM; main provides the cross-process work (mint + read side store +
@@ -621,6 +641,16 @@ export interface IpcSendMap {
   [IpcChannel.WindowSetStripMovable]: WindowSetStripMovablePayload;
   [IpcChannel.AppNotifyDegraded]: AppNotifyDegradedPayload;
   [IpcChannel.RealtimeMintError]: RealtimeMintErrorPayload;
+  // § push-to-talk (native global key listener)
+  [IpcChannel.PttDown]: PttSignalPayload;
+  [IpcChannel.PttUp]: PttSignalPayload;
+  [IpcChannel.PttLock]: PttSignalPayload;
+}
+
+// ─── § push-to-talk payloads ──────────────────────────────────────────────
+/** Carries the event wall-clock so the renderer can de-dupe / measure. */
+export interface PttSignalPayload {
+  at: number;
 }
 
 /** Invoke-style channels (request → ack). */

@@ -219,6 +219,80 @@ export function App(): JSX.Element {
     });
   }, [client, surface]);
 
+  // ── Push-to-talk (native ⌃⌥ listener relayed from main) ────────────────
+  // Wispr-Flow model: HOLD ⌃⌥ to talk (connect-on-demand + hold-open mic),
+  // release to send (mute → idle teardown stops billing). DOUBLE-TAP to lock
+  // hands-free (mic stays open until toggled off). GATED to strip surface.
+  // connect() is async (~1–2s); we reconcile to the LATEST intent once the
+  // peer is live, so a quick hold released mid-connect ends up muted, not hot.
+  useEffect(() => {
+    if (surface !== 'strip') return;
+    const bridge = window.director;
+    if (!bridge?.ptt) return;
+    let pttHeld = false;
+    const settleTimers = new Set<ReturnType<typeof setInterval>>();
+
+    const summonIfDormant = (): void => {
+      const s = useStore.getState();
+      if (s.strip.kind === 'dormant' || s.strip.kind === 'hive') s.summon('tap');
+    };
+    // Run `cb` once the peer is connected — now if already live, else connect
+    // on demand and poll until the data channel is up (bounded ~8s).
+    const whenConnected = (cb: () => void): void => {
+      if (client.status === 'connected') {
+        cb();
+        return;
+      }
+      if (client.status === 'idle' || client.status === 'closed' || client.status === 'error') {
+        client.connect().catch((err) => console.error('[realtime] PTT connect failed', err));
+      }
+      const t = setInterval(() => {
+        if (client.status === 'connected') {
+          clearInterval(t);
+          settleTimers.delete(t);
+          cb();
+        } else if (client.status === 'idle' || client.status === 'error') {
+          clearInterval(t);
+          settleTimers.delete(t);
+        }
+      }, 100);
+      settleTimers.add(t);
+      setTimeout(() => {
+        clearInterval(t);
+        settleTimers.delete(t);
+      }, 8000);
+    };
+
+    const offDown = bridge.ptt.onDown(() => {
+      pttHeld = true;
+      summonIfDormant();
+      // Reconcile to the held state at the moment we're actually live.
+      whenConnected(() => client.setMicMode(pttHeld ? 'hold-open' : 'muted'));
+    });
+
+    const offUp = bridge.ptt.onUp(() => {
+      pttHeld = false;
+      if (client.status === 'connected') client.setMicMode('muted');
+      // If still mid-connect, the whenConnected callback above sees pttHeld
+      // === false and lands on muted — no hot mic after a released hold.
+    });
+
+    const offLock = bridge.ptt.onLock(() => {
+      summonIfDormant();
+      // Capture intent now: off (muted/disconnected) → turn ON; on → turn OFF.
+      const wantOn = client.status !== 'connected' || client.micMode === 'muted';
+      whenConnected(() => client.setMicMode(wantOn ? 'tap-open' : 'muted'));
+    });
+
+    return () => {
+      offDown();
+      offUp();
+      offLock();
+      settleTimers.forEach((t) => clearInterval(t));
+      settleTimers.clear();
+    };
+  }, [client, surface]);
+
   // ── Drive stripState from real Realtime events ─────────────────────────
   //
   //  - mic mode flips to tap-open / hold-open → setListening
