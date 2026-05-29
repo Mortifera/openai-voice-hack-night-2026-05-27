@@ -239,7 +239,12 @@ export type ToolName =
   | 'ask_user'
   | 'read_world_state'
   | 'canvas_response'
-  | 'dispatch_agent_mock';
+  | 'dispatch_agent_mock'
+  // ─── § P6.4 kill/extend (gap 14) ─── append-only ToolName additions.
+  // Hang-resolution tools the user's voice answer routes to after the
+  // watchdog escalates. Handled in main/tool-router.ts § kill-extend.
+  | 'kill_agent'
+  | 'extend_agent';
 
 export interface ToolCallRequest {
   callId: string;

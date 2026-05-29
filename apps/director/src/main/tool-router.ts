@@ -43,6 +43,11 @@ import {
 // § P6.4 hang-watchdog — see EOF marker for wiring.
 import { announceAgentHang } from './planner.js';
 import { setHangAnnouncer } from './codex-pool-core.js';
+// § P6.4 kill/extend resolution (gap 14) — see § kill-extend marker at EOF.
+import {
+  killAgentCore,
+  extendHangThreshold,
+} from './codex-pool-core.js';
 // ─── § renderer-wireup (gap 8) — onboarding persistence ──────────────────
 import { basename } from 'node:path';
 import { writeMeta, getSessionDir } from './side-store.js';
@@ -411,6 +416,10 @@ export async function routeToolCall(req: ToolCallRequest): Promise<ToolCallRespo
         return await handleUpdateHarness(req, args as unknown as UpdateHarnessArgs);
       case 'consult_director':
         return await handleConsultDirector(req, args as unknown as ConsultArgs);
+      case 'kill_agent':
+        return await handleKillAgent(req, args as unknown as KillAgentArgs);
+      case 'extend_agent':
+        return await handleExtendAgent(req, args as unknown as ExtendAgentArgs);
       default:
         console.warn('[tool-router] unknown tool', req.name);
         return {
@@ -632,4 +641,99 @@ function registerOnboardingIpc(): void {
       }
     },
   );
+}
+
+// ─── § kill-extend (gap 14) — hang resolution tool handlers ──────────────
+// Append-only marker per docs/contracts.md § 13.1. After the watchdog
+// escalates ("Maya seems stuck — kill or extend?") the user's spoken answer
+// routes to one of these two tools (declared in shared/realtime.ts
+// `realtimeToolDefs()` — see deviations re: tool-def registration).
+//
+//   kill_agent(agentId)   → `killAgentCore`: archives the worktree to
+//                           ~/.director/abandoned/<ts>-<agent>/ then aborts
+//                           the agent (SDK AbortController drives the
+//                           SIGTERM→grace→SIGKILL of the Codex subprocess).
+//                           Patches the agent card status → 'error' and logs
+//                           an `agent_block_resolved` decision.
+//   extend_agent(agentId) → `extendHangThreshold`: re-arms the stopwatch +
+//                           doubles the escalation threshold (60s → 120s) so
+//                           the next escalation waits twice as long.
+
+interface KillAgentArgs {
+  agent: string;
+}
+
+interface ExtendAgentArgs {
+  agent: string;
+}
+
+async function handleKillAgent(
+  req: ToolCallRequest,
+  args: KillAgentArgs,
+): Promise<ToolCallResponse> {
+  const startedAt = Date.now();
+  const agentId = resolveIdentity(String(args?.agent ?? '')).id;
+  const res = await killAgentCore(agentId);
+
+  // Reflect the kill on the agent card regardless of archive outcome.
+  sendStripPatch('agents', {
+    action: 'updateAgent',
+    id: agentId,
+    patch: {
+      status: 'error',
+      blocker: 'killed by user',
+      finishedAt: Date.now(),
+    },
+  });
+
+  appendDecision({
+    at: Date.now(),
+    kind: 'agent_block_resolved',
+    payload: {
+      resolution: 'kill',
+      agent_id: agentId,
+      archivedTo: res.archivedTo ?? null,
+      ok: res.ok,
+    },
+  }).catch((err) => console.warn('[tool-router] kill decision log failed', err));
+
+  return {
+    ok: true,
+    callId: req.callId,
+    output: { agent_id: agentId, killed: res.ok, archivedTo: res.archivedTo ?? null },
+    latencyMs: Date.now() - startedAt,
+  };
+}
+
+async function handleExtendAgent(
+  req: ToolCallRequest,
+  args: ExtendAgentArgs,
+): Promise<ToolCallResponse> {
+  const startedAt = Date.now();
+  const agentId = resolveIdentity(String(args?.agent ?? '')).id;
+  const newThresholdMs = extendHangThreshold(agentId);
+
+  // Clear the watchdog blocker stamp so the card reflects the extension.
+  sendStripPatch('agents', {
+    action: 'updateAgent',
+    id: agentId,
+    patch: { blocker: null },
+  });
+
+  appendDecision({
+    at: Date.now(),
+    kind: 'agent_block_resolved',
+    payload: {
+      resolution: 'extend',
+      agent_id: agentId,
+      newThresholdMs,
+    },
+  }).catch((err) => console.warn('[tool-router] extend decision log failed', err));
+
+  return {
+    ok: true,
+    callId: req.callId,
+    output: { agent_id: agentId, newThresholdMs },
+    latencyMs: Date.now() - startedAt,
+  };
 }

@@ -36,6 +36,11 @@ export type DecisionKind =
   | 'agent_completed'
   | 'canvas_picked'
   | 'goal_set'
+  // ─── § P6.5 fan-in (advisory 16) ─── append-only DecisionKind addition.
+  // Logged by the batch_completed → mergeFanIn consumer when a batch of
+  // agents auto-merges into the integration branch (non-overlapping diffs).
+  // Carries { agentIds, integrationBranch, sha } in `payload`.
+  | 'auto_merged'
   | 'other';
 
 export interface Decision {

@@ -29,7 +29,7 @@
 import { spawn } from 'node:child_process';
 import type { AgentId } from '../shared/state.js';
 import type { WorktreeHandle } from './codex-worktree.js';
-import { appendDecision } from './side-store.js';
+import { appendDecision, type DecisionKind } from './side-store.js';
 
 // ─── Public types ──────────────────────────────────────────────────────
 
@@ -61,6 +61,11 @@ export interface MergeDiff {
   files: string[];
   /** Full `git diff main...HEAD` patch text — empty string on diff failure. */
   patch: string;
+  // ─── § P6.5 fan-in (advisory 16) ─── append-only field. Worktree HEAD
+  // sha captured at fan-in time, surfaced so the batch consumer can log it
+  // into decisions.jsonl / the batch_completed audit trail. Null on a
+  // `git rev-parse HEAD` failure.
+  sha?: string | null;
 }
 
 export interface MergeResult {
@@ -122,14 +127,15 @@ function run(
 
 async function tryAppendDecision(
   payload: Record<string, unknown>,
+  // § P6.5 advisory 16 — auto-merges now log the dedicated 'auto_merged'
+  // DecisionKind (added to side-store.ts under its own marker); approval /
+  // conflict / empty-batch paths keep the catch-all 'other' kind.
+  kind: DecisionKind = 'other',
 ): Promise<void> {
   try {
     await appendDecision({
       at: Date.now(),
-      // The shared DecisionKind enum doesn't include 'merge' yet — using
-      // the closest catch-all so we stay schema-compatible without
-      // editing W1/W3-owned types in this lane.
-      kind: 'other',
+      kind,
       payload: { merge: payload },
     });
   } catch (err) {
@@ -262,7 +268,7 @@ export async function mergeFanIn(
     const sha = await headSha(w.handle.path);
     const files = await diffNameOnly(w.handle.path, integrationBranch);
     const patch = await diffPatch(w.handle.path, integrationBranch);
-    diffs.push({ agentId: w.agentId, files, patch });
+    diffs.push({ agentId: w.agentId, files, patch, sha });
     if (!sha) {
       console.warn(
         `[worktree-merger] could not resolve HEAD for ${w.agentId} at ${w.handle.path}`,
@@ -337,11 +343,16 @@ export async function mergeFanIn(
     sha: finalSha,
     integrationBranch,
   };
-  await tryAppendDecision({
-    mode: result.mode,
-    agentIds: agents,
-    integrationBranch,
-    sha: finalSha,
-  });
+  await tryAppendDecision(
+    {
+      mode: result.mode,
+      agentIds: agents,
+      integrationBranch,
+      sha: finalSha,
+      // Per-agent HEAD shas captured at fan-in (advisory 16 audit trail).
+      shas: diffs.map((d) => ({ agentId: d.agentId, sha: d.sha ?? null })),
+    },
+    'auto_merged',
+  );
   return result;
 }

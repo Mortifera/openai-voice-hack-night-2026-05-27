@@ -24,7 +24,8 @@ import {
   type ThreadItem,
 } from '@openai/codex-sdk';
 import { promises as fs } from 'node:fs';
-import { join } from 'node:path';
+import { homedir } from 'node:os';
+import { join, dirname } from 'node:path';
 import type { AgentId, AgentRole } from '../shared/state.js';
 import type { CodexEvent, CodexEventType } from '../shared/codex.js';
 import { createWorktree, type WorktreeHandle } from './codex-worktree.js';
@@ -288,7 +289,7 @@ export async function dispatchAgentCore(
   // we wrap the emit callback so agent_finished triggers a batch sweep
   // that synthesizes `batch_completed` when the last agent in the batch
   // finishes. No-op if req.batchId is undefined.
-  registerAgentInBatch(req.batchId, req.agentId);
+  registerAgentInBatch(req.batchId, req.agentId, req.targetRepo);
   const innerEmit = onEvent;
   onEvent = (ev) =>
     wrapEmitForBatch(req.batchId, req.agentId, innerEmit, ev);
@@ -349,12 +350,22 @@ export async function dispatchAgentCore(
 
     void (async () => {
       try {
-        const { events } = await thread.runStreamed(req.task, {
-          signal: abort.signal,
-        });
-        for await (const ev of events) {
-          if (abort.signal.aborted) break;
-          emitFromThreadEvent(req.agentId, ev, onEvent);
+        // § P6.4 DIRECTOR_TEST_HANG — see EOF marker. When the env var
+        // names THIS agent, deliberately stall the run loop (no SDK call,
+        // no events) until the abort signal fires. This drives the hang
+        // watchdog headlessly: with no output flowing, `lastOutputAt`
+        // never advances past the dispatch-time `agent_started` and the
+        // watchdog escalates after `DIRECTOR_HANG_THRESHOLD_MS`.
+        if (shouldDeliberatelyHang(req.agentId)) {
+          await waitForAbort(abort.signal);
+        } else {
+          const { events } = await thread.runStreamed(req.task, {
+            signal: abort.signal,
+          });
+          for await (const ev of events) {
+            if (abort.signal.aborted) break;
+            emitFromThreadEvent(req.agentId, ev, onEvent);
+          }
         }
       } catch (err) {
         const isAbort =
@@ -372,17 +383,27 @@ export async function dispatchAgentCore(
         }
       } finally {
         record.finished = true;
+        // § gap 13 — defer cleanup for batched agents. If this agent
+        // belongs to a batch, DO NOT tear down the worktree here: the
+        // synthetic `batch_completed` consumer (worktree-merger fan-in)
+        // needs the branch + worktree dir intact to compute diffs and
+        // merge. We stash the live handle on the batch record and the
+        // consumer calls `releaseBatchWorktrees(batchId)` post-merge.
+        // Non-batched agents keep the original eager cleanup.
+        const deferred = stashHandleForBatch(req.batchId, req.agentId, record.handle);
+        if (!deferred) {
+          try {
+            await record.handle.cleanup();
+          } catch (err) {
+            console.warn('[codex-pool-core] worktree cleanup failed', err);
+          }
+        }
         onEvent({
           agent_id: req.agentId,
           type: 'agent_finished',
           payload: { aborted: abort.signal.aborted },
           at: Date.now(),
         });
-        try {
-          await record.handle.cleanup();
-        } catch (err) {
-          console.warn('[codex-pool-core] worktree cleanup failed', err);
-        }
         agents.delete(req.agentId);
         release();
         resolveDone();
@@ -412,6 +433,69 @@ export function abortAgentCore(agentId: AgentId): boolean {
   return true;
 }
 
+// ─── § P6.4 kill/extend resolution (gap 14) ────────────────────────────
+//
+// Phase 6.4 DoD: after the watchdog escalates ("kill or extend?"), the
+// user's voice answer routes to one of two resolutions (the tool-router
+// exposes `kill_agent` / `extend_agent` handlers that call into here):
+//
+//   - KILL  → `killAgentCore(agentId)`: archive the agent's worktree to
+//             `~/.director/abandoned/<ts>-<agent>/` (so the user can inspect
+//             the abandoned work) THEN abort the agent. The underlying SDK
+//             abort resolves the run loop; the finally{} block emits
+//             `agent_finished` and git-removes the now-archived worktree.
+//             SIGTERM→grace→SIGKILL of the Codex subprocess is owned by the
+//             SDK behind `AbortController` — we drive it via `abort()`.
+//   - EXTEND → `extendHangThreshold(agentId)` (above): re-arm + double the
+//             threshold for the next escalation.
+
+/** Archive root for killed-agent worktrees (advisory: keep, don't delete). */
+function abandonedRoot(): string {
+  return join(homedir(), '.director', 'abandoned');
+}
+
+export interface KillAgentResult {
+  ok: boolean;
+  /** Absolute path the worktree contents were archived to (if any). */
+  archivedTo?: string;
+  error?: string;
+}
+
+/**
+ * § gap 14 — resolve a hang by killing the agent. Snapshots the agent's
+ * worktree into the abandoned dir, then aborts so the run loop unwinds.
+ * Safe to call for a non-live agent (returns ok:false). Archiving is
+ * best-effort: an archive failure still aborts the agent (we never want a
+ * stuck FS to block the kill).
+ */
+export async function killAgentCore(
+  agentId: AgentId,
+): Promise<KillAgentResult> {
+  const rec = agents.get(agentId);
+  if (!rec) {
+    return { ok: false, error: `agent ${agentId} not running` };
+  }
+  let archivedTo: string | undefined;
+  try {
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const dest = join(abandonedRoot(), `${ts}-${agentId}`);
+    await fs.mkdir(dirname(dest), { recursive: true });
+    // Copy the worktree contents (the git worktree dir gets removed by the
+    // finally{} cleanup; the archive is an independent snapshot).
+    await fs.cp(rec.handle.path, dest, { recursive: true });
+    archivedTo = dest;
+  } catch (err) {
+    console.warn(
+      `[codex-pool-core] kill archive failed for ${agentId}`,
+      err,
+    );
+  }
+  // Clear any hang-fired flag so we don't re-escalate during teardown.
+  hangState.hangFired.delete(agentId);
+  rec.abort.abort();
+  return { ok: true, archivedTo };
+}
+
 export function getActiveAgentsCore(): AgentId[] {
   return Array.from(agents.keys());
 }
@@ -437,6 +521,33 @@ export async function abortAllAgentsCore(): Promise<void> {
     dones.push(rec.done);
   }
   await Promise.all(dones);
+}
+
+// ─── § P6.4 DIRECTOR_TEST_HANG ─────────────────────────────────────────
+//
+// Phase 6.4 DoD (`docs/remaining-phases.md` § 6.4): a headless way to make
+// a named agent deliberately stall so the 60s hang watchdog + kill/extend
+// escalation can be exercised without a live Codex run. When
+// `DIRECTOR_TEST_HANG` equals an agent id, `dispatchAgentCore` skips the
+// SDK run loop entirely and parks on the abort signal — no events flow, so
+// the watchdog's `lastOutputAt` for that agent never advances past the
+// dispatch-time `agent_started` and it escalates after
+// `DIRECTOR_HANG_THRESHOLD_MS` (tests set a short threshold).
+//
+// `kill_agent` (tool-router) aborts the agent, which resolves `waitForAbort`
+// and lets the finally{} block run normally (archive + agent_finished).
+
+function shouldDeliberatelyHang(agentId: AgentId): boolean {
+  const target = process.env.DIRECTOR_TEST_HANG;
+  return typeof target === 'string' && target.length > 0 && target === agentId;
+}
+
+/** Resolve when the abort signal fires (never on its own). */
+function waitForAbort(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    signal.addEventListener('abort', () => resolve(), { once: true });
+  });
 }
 
 // ─── § batch-tracking ──────────────────────────────────────────────────
@@ -468,12 +579,25 @@ interface BatchAgentEntry {
   worktreePath: string | null;
   branch: string | null;
   finished: boolean;
+  /**
+   * § gap 13 — live worktree handle retained past `agent_finished` for
+   * batched agents so the fan-in consumer can diff/merge before cleanup.
+   * Null until the streaming loop's finally{} stashes it; null again
+   * after `releaseBatchWorktrees` tears it down.
+   */
+  handle: WorktreeHandle | null;
 }
 
 interface BatchRecord {
   batchId: string;
   agents: Map<AgentId, BatchAgentEntry>;
   emitted: boolean;
+  /**
+   * § gap 12 — host repo the agents' worktrees were added to (the dispatch
+   * `targetRepo`). The fan-in consumer needs this to point `mergeFanIn` at
+   * the integration repo. All agents in a batch share one target repo.
+   */
+  repoRoot: string | null;
 }
 
 const batches = new Map<string, BatchRecord>();
@@ -481,21 +605,105 @@ const batches = new Map<string, BatchRecord>();
 function registerAgentInBatch(
   batchId: string | undefined,
   agentId: AgentId,
+  repoRoot?: string,
 ): void {
   if (!batchId) return;
   let batch = batches.get(batchId);
   if (!batch) {
-    batch = { batchId, agents: new Map(), emitted: false };
+    batch = { batchId, agents: new Map(), emitted: false, repoRoot: null };
     batches.set(batchId, batch);
   }
+  if (repoRoot && !batch.repoRoot) batch.repoRoot = repoRoot;
   if (!batch.agents.has(agentId)) {
     batch.agents.set(agentId, {
       agentId,
       worktreePath: null,
       branch: null,
       finished: false,
+      handle: null,
     });
   }
+}
+
+/**
+ * § gap 13 — stash a finished batched agent's live worktree handle so the
+ * fan-in consumer can diff/merge against intact branches. Returns `true`
+ * when the handle was retained (cleanup deferred), `false` when the agent
+ * does not belong to a tracked batch (caller cleans up eagerly).
+ */
+function stashHandleForBatch(
+  batchId: string | undefined,
+  agentId: AgentId,
+  handle: WorktreeHandle,
+): boolean {
+  if (!batchId) return false;
+  const batch = batches.get(batchId);
+  if (!batch) return false;
+  const entry = batch.agents.get(agentId);
+  if (!entry) return false;
+  entry.handle = handle;
+  return true;
+}
+
+/**
+ * § gap 13 — tear down every retained worktree for a batch. The fan-in
+ * consumer (worktree-merger) calls this AFTER `mergeFanIn` resolves so the
+ * branches survive long enough to be diffed + merged. Advisory 16: callers
+ * that auto-merge should `git worktree remove` first (mergeFanIn handles
+ * the integration-branch side); this just disposes the per-agent handles
+ * the pool deferred. Idempotent — clears each handle after cleanup so a
+ * double call is a no-op. `skip` lets a conflict path keep specific agents'
+ * worktrees on disk for manual inspection.
+ */
+export async function releaseBatchWorktrees(
+  batchId: string,
+  opts?: { skip?: AgentId[] },
+): Promise<void> {
+  const batch = batches.get(batchId);
+  if (!batch) return;
+  const skip = new Set(opts?.skip ?? []);
+  const handles: Array<{ agentId: AgentId; handle: WorktreeHandle }> = [];
+  for (const entry of batch.agents.values()) {
+    if (entry.handle && !skip.has(entry.agentId)) {
+      handles.push({ agentId: entry.agentId, handle: entry.handle });
+    }
+  }
+  await Promise.all(
+    handles.map(async ({ agentId, handle }) => {
+      try {
+        await handle.cleanup();
+      } catch (err) {
+        console.warn(
+          `[codex-pool-core] deferred worktree cleanup failed for ${agentId}`,
+          err,
+        );
+      }
+      const entry = batch.agents.get(agentId);
+      if (entry) entry.handle = null;
+    }),
+  );
+}
+
+/**
+ * § gap 13 — expose the retained handles for a completed batch so the
+ * Electron-side consumer can build `AttributedWorktree[]` for `mergeFanIn`
+ * without re-deriving paths. `repoRoot` is the shared host repo captured at
+ * dispatch. `handles` is `[]` if the batch is unknown or no handles were
+ * stashed (e.g. a non-deferred / already-released batch).
+ */
+export function getBatchWorktreeHandles(batchId: string): {
+  repoRoot: string | null;
+  handles: Array<{ agentId: AgentId; handle: WorktreeHandle }>;
+} {
+  const batch = batches.get(batchId);
+  if (!batch) return { repoRoot: null, handles: [] };
+  const handles: Array<{ agentId: AgentId; handle: WorktreeHandle }> = [];
+  for (const entry of batch.agents.values()) {
+    if (entry.handle) {
+      handles.push({ agentId: entry.agentId, handle: entry.handle });
+    }
+  }
+  return { repoRoot: batch.repoRoot, handles };
 }
 
 function recordBatchWorktree(
@@ -623,6 +831,20 @@ export function _resetBatchTrackingForTests(): void {
 export const _batchTrackingTestHooks = {
   register: registerAgentInBatch,
   emit: wrapEmitForBatch,
+  /**
+   * Test-only: seed a retained worktree handle onto a batch entry so the
+   * Electron-side fan-in consumer (`codex-pool.ts onBatchCompleted`) can be
+   * exercised without driving a real dispatch finally{}.
+   */
+  seedHandle: (
+    batchId: string,
+    agentId: AgentId,
+    handle: WorktreeHandle,
+    repoRoot?: string,
+  ): void => {
+    registerAgentInBatch(batchId, agentId, repoRoot);
+    stashHandleForBatch(batchId, agentId, handle);
+  },
 };
 
 /**
@@ -696,6 +918,13 @@ interface HangWatchdogState {
   hangFired: Set<AgentId>;
   announcer: ((agentId: AgentId) => void | Promise<void>) | null;
   now: () => number;
+  /**
+   * § gap 14 — per-agent threshold override. When the user says "more
+   * time", `extendHangThreshold(agentId)` doubles that agent's escalation
+   * threshold for the NEXT fire (default → 120s). Falls back to the global
+   * `thresholdMs` when no override is set.
+   */
+  perAgentThresholdMs: Map<AgentId, number>;
 }
 
 function readEnvNumber(name: string, fallback: number): number {
@@ -729,6 +958,7 @@ const hangState: HangWatchdogState = {
   hangFired: new Set(),
   announcer: null,
   now: () => Date.now(),
+  perAgentThresholdMs: new Map(),
 };
 
 function ensureHangWatchdogStarted(): void {
@@ -747,13 +977,17 @@ function checkHangWatchdog(): void {
   for (const [agentId, lastAt] of hangState.lastOutputAt.entries()) {
     if (hangState.hangFired.has(agentId)) continue;
     const sinceMs = now - lastAt;
-    if (sinceMs <= hangState.thresholdMs) continue;
+    // § gap 14 — honor a per-agent extended threshold if the user asked
+    // for "more time"; otherwise the global threshold applies.
+    const effectiveThreshold =
+      hangState.perAgentThresholdMs.get(agentId) ?? hangState.thresholdMs;
+    if (sinceMs <= effectiveThreshold) continue;
     hangState.hangFired.add(agentId);
     const event: CodexEvent = {
       agent_id: agentId,
       type: 'agent_hang_suspected',
       payload: {
-        thresholdMs: hangState.thresholdMs,
+        thresholdMs: effectiveThreshold,
         lastOutputAt: lastAt,
         sinceMs,
       },
@@ -837,6 +1071,34 @@ export function resetHangStopwatch(agentId: AgentId): void {
   hangState.hangFired.delete(agentId);
 }
 
+/**
+ * § gap 14 — "more time" resolution. Re-arms the stopwatch for `agentId`
+ * AND doubles its escalation threshold for the next fire (default 60s →
+ * 120s; a prior extension to 120s → 240s, etc). Returns the new effective
+ * threshold so the caller can narrate it. The `extend_agent` tool-router
+ * handler calls this when the user answers "give it more time".
+ */
+export function extendHangThreshold(agentId: AgentId): number {
+  const current =
+    hangState.perAgentThresholdMs.get(agentId) ?? hangState.thresholdMs;
+  const next = current * 2;
+  hangState.perAgentThresholdMs.set(agentId, next);
+  // Reset the stopwatch so the watchdog doesn't immediately re-fire on the
+  // already-elapsed gap.
+  hangState.lastOutputAt.set(agentId, hangState.now());
+  hangState.hangFired.delete(agentId);
+  return next;
+}
+
+/**
+ * § gap 14 — current effective hang threshold for an agent (per-agent
+ * override if set, else the global default). Exposed for the kill/extend
+ * tool handlers + tests.
+ */
+export function getEffectiveHangThreshold(agentId: AgentId): number {
+  return hangState.perAgentThresholdMs.get(agentId) ?? hangState.thresholdMs;
+}
+
 /** Test-only: drop every entry + clear the interval so cases stay isolated. */
 export function _resetHangWatchdogForTests(): void {
   if (hangState.interval) {
@@ -847,6 +1109,7 @@ export function _resetHangWatchdogForTests(): void {
   hangState.announcer = null;
   hangState.lastOutputAt.clear();
   hangState.hangFired.clear();
+  hangState.perAgentThresholdMs.clear();
   hangState.thresholdMs = defaultThresholdMs();
   hangState.intervalMs = defaultIntervalMs(hangState.thresholdMs);
   hangState.now = () => Date.now();
